@@ -1,0 +1,48 @@
+# Din bolåneprofil. Fyll i dina egna siffror – exemplet nedan är fiktivt.
+# Räntor anges i procent, rabatter i procentenheter (pe), belopp i kronor.
+#
+# Bindningstider: "3M" (rörlig), "1Y", "2Y", "3Y", "5Y", "10Y"
+
+[lan]
+belopp = 3_000_000
+horisont_ar = 10                 # planeringshorisont
+amortering_per_ar = 60_000
+nuvarande_tenor = "3M"           # vad du har idag
+nuvarande_ranta = 2.95           # din nuvarande ränta (används om bundet)
+bundet_kvar_manader = 0          # månader kvar till villkorsändringsdag (0 = rörligt/fritt)
+ranteavdrag = true               # räkna med 30 %/21 % ränteavdrag
+diskonteringsranta = 2.0         # för nuvärdesberäkning (%/år)
+budget_manad = 12_000            # varningsgräns för räntekostnad per månad (kr, före avdrag)
+rse_paslag = 1.0                 # påslag i jämförelseräntan för ränteskillnadsersättning (kontrollera med banken)
+
+[risk]
+riskaversion = 0.25              # λ: 0 = bara förväntad kostnad, 0.25 = balanserad, 0.5 = försiktig, 1+ = mycket försiktig
+cvar_niva = 0.95                 # CVaR95 = snittet av de 5 % sämsta scenarierna
+scenarier = 3000
+
+# Ett [[bank]]-block per bank/erbjudande. Listräntor från bankens webb,
+# rabatter från ditt erbjudande (eller bankens "snittränta" − listränta).
+# befintlig_kund_rabattandel: andel av rabatten du får vid ny räntesättning om du
+# INTE förhandlar (används i "passiva" strategier).
+
+[[bank]]
+namn = "Nuvarande bank"
+nuvarande = true
+listrantor = { "3M" = 3.64, "1Y" = 3.79, "2Y" = 3.94, "3Y" = 3.99, "5Y" = 4.19, "10Y" = 4.39 }
+rabatter   = { "3M" = 0.70, "1Y" = 0.55, "2Y" = 0.45, "3Y" = 0.45, "5Y" = 0.40, "10Y" = 0.30 }
+flyttkostnad = 0
+befintlig_kund_rabattandel = 0.6
+
+[[bank]]
+namn = "Bank B (offert)"
+listrantor = { "3M" = 3.59, "1Y" = 3.74, "2Y" = 3.84, "3Y" = 3.94, "5Y" = 4.14, "10Y" = 4.44 }
+rabatter   = { "3M" = 0.85, "1Y" = 0.60, "2Y" = 0.50, "3Y" = 0.50, "5Y" = 0.45, "10Y" = 0.35 }
+flyttkostnad = 1_500
+befintlig_kund_rabattandel = 0.6
+
+[[bank]]
+namn = "Bank C (bolåneinstitut)"
+listrantor = { "3M" = 2.89, "1Y" = 3.15, "2Y" = 3.40, "3Y" = 3.45, "5Y" = 3.70, "10Y" = 3.85 }
+rabatter   = { "3M" = 0.0, "1Y" = 0.0, "2Y" = 0.0, "3Y" = 0.0, "5Y" = 0.0, "10Y" = 0.0 }
+flyttkostnad = 2_000
+befintlig_kund_rabattandel = 1.0   # inga individuella rabatter – samma ränta för alla

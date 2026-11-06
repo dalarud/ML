@@ -1,0 +1,4 @@
+data/modellcache.pkl
+__pycache__/
+*.pyc
+.pytest_cache/
