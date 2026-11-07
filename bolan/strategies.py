@@ -58,6 +58,9 @@ class Lan:
     nettoinkomst_manad: float | None = None
     ovriga_boendekostnader_manad: float = 0.0   # drift/avgift, el, försäkring m.m.
     levnadskostnader_manad: float = 0.0         # mat, kläder, transport m.m. (KALP)
+    barnbidrag_manad: float = 0.0               # skattefritt
+    hyresintakt_manad: float = 0.0              # brutto; beskattas med schablonavdrag
+    andra_lan_manad: float = 0.0                # amortering + ränta på övriga lån
 
 
 def amorteringskrav_andel(ltv: float) -> float:
@@ -223,7 +226,7 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
     pv = netto @ df + engang - terminal_vinst * (1 - 0.3 * lan.ranteavdrag) * df[-1]
     snittranta = (kostnad_m.sum(1) / (saldo.sum() / 1200)) if saldo.sum() > 0 else np.zeros(n)
     # Boendekostnad per månad (ränta efter avdrag + amortering + övrigt) och kvar att leva på
-    boende = netto + plan["amortering"].values[None, :] + lan.ovriga_boendekostnader_manad
+    boende = netto + plan["amortering"].values[None, :] + lan.ovriga_boendekostnader_manad + lan.andra_lan_manad
     ut = {
         "pv": pv,
         "snittranta": snittranta,
@@ -235,9 +238,13 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
         "boende_ar1": boende[:, :12].mean(1),
     }
     if lan.nettoinkomst_manad:
-        kvar = lan.nettoinkomst_manad - boende - lan.levnadskostnader_manad
+        from .hushall import total_nettoinkomst
+        ink = total_nettoinkomst(lan)
+        kvar = ink - boende - lan.levnadskostnader_manad
         ut["kvar_min"] = kvar.min(1)
-        ut["boendeandel_max"] = boende.max(1) / lan.nettoinkomst_manad
+        ut["boendeandel_max"] = boende.max(1) / ink
+        # Samma sak utan hyresintäkt (hyresgästen flyttar)
+        ut["kvar_min_utan_hyra"] = (total_nettoinkomst(lan, med_hyra=False) - boende - lan.levnadskostnader_manad).min(1)
     return ut
 
 

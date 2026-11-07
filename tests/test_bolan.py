@@ -138,3 +138,21 @@ def test_ranteavdrag_tva_lantagare():
     tva = Lan(belopp=3_500_000, diskonteringsranta=0.0, amorteringskrav=False, antal_lantagare=2)
     # 140 000 kr ränta/år: en låntagare får bara 21 % på 40 000 kr, två får 30 % på allt
     assert utvardera(s, b, tva, R)["pv"].mean() < utvardera(s, b, en, R)["pv"].mean()
+
+
+def test_netto_hyra_schablon():
+    from bolan.hushall import netto_hyra
+    assert netto_hyra(3_000) == 3_000                       # 36 000 kr/år < schablon -> skattefritt
+    # 120 000 kr/år: överskott 120 000 − 40 000 − 24 000 = 56 000, skatt 30 % = 16 800
+    assert np.isclose(netto_hyra(10_000), (120_000 - 16_800) / 12)
+
+
+def test_riskprofil_klassning_foljer_marginal():
+    from bolan.hushall import riskprofil
+    bas = dict(belopp=3_000_000, bostadsvarde=4_000_000, antal_lantagare=2, nettoinkomst_manad=55_000,
+               ovriga_boendekostnader_manad=5_000, levnadskostnader_manad=25_000)
+    rik = riskprofil(Lan(**bas | {"nettoinkomst_manad": 90_000}), 3.0)
+    fattig = riskprofil(Lan(**bas | {"nettoinkomst_manad": 40_000}), 3.0)
+    assert rik["lambda"] < fattig["lambda"]
+    assert rik["klass"] == "Hög" and fattig["klass"] == "Mycket låg"
+    assert rik["brytranta"]["Med hyra"] > fattig["brytranta"]["Med hyra"]

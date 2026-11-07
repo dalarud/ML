@@ -227,16 +227,31 @@ def ekonomi_sektion(a, df) -> str:
     pct = lambda v: f"{v:.0%}"
     plan = ek["plan"].copy()
     plan.columns = ["Lån vid årets början kr", "Amortering under året kr", "Belåningsgrad", "Amorteringskrav"]
-    kalp_kol = [c for c in ["boende_ar1", "boende_max_p95", "boendeandel_max_p95", "kvar_min_p5", "p_underskott"] if c in df]
+    kalp_kol = [c for c in ["boende_ar1", "boende_max_p95", "boendeandel_max_p95", "kvar_min_p5", "p_underskott",
+                            "p_underskott_utan_hyra"] if c in df]
     kalp = df.head(10)[["strategi"] + kalp_kol].rename(columns={
         "strategi": "Strategi", "boende_ar1": "Boendekostnad år 1 kr/mån", "boende_max_p95": "Högsta boendekostnad P95 kr/mån",
         "boendeandel_max_p95": "Andel av netto P95", "kvar_min_p5": "Minsta kvar att leva på P5 kr/mån",
-        "p_underskott": "P(underskott)"})
+        "p_underskott": "P(underskott)", "p_underskott_utan_hyra": "P(underskott) utan hyra"})
     fmt = {"Boendekostnad år 1 kr/mån": _kr, "Högsta boendekostnad P95 kr/mån": _kr, "Andel av netto P95": pct,
-           "Minsta kvar att leva på P5 kr/mån": _kr, "P(underskott)": lambda v: f"{v:.1%}"}
+           "Minsta kvar att leva på P5 kr/mån": _kr, "P(underskott)": lambda v: f"{v:.1%}",
+           "P(underskott) utan hyra": lambda v: f"{v:.1%}"}
     stress = ek["stress"]
     sfmt = {c: _kr for c in stress.columns if "kr" in c}
-    sfmt["Andel av nettoinkomst"] = pct
+    sfmt["Marginal (andel av levnadskostn.)"] = pct
+    sfmt["Bolåneränta %"] = lambda v: f"{v:.2f}"
+    rp = ek.get("riskprofil")
+    rp_html = ""
+    if rp:
+        rp_html = (f"<div class='rek'>RISKPROFIL: riskbärande förmåga {html.escape(rp['klass'].upper())} → "
+                   f"riskaversion λ = {rp['lambda']}\n{html.escape(rp['motivering'])}\n"
+                   "Räntenivå där kvar att leva på når noll: " +
+                   html.escape(", ".join(f"{k.lower()} {v:.1f} %" for k, v in rp["brytranta"].items())) +
+                   f"\nVarje procentenhet högre bolåneränta kostar ≈ {_kr(rp['kostnad_per_pe'])} kr/mån efter ränteavdrag."
+                   "</div><p class='note'>Klassning: marginal i huvudstresstestet (7 % ränta + ingen hyresintäkt) "
+                   "som andel av levnadskostnaderna. ≥ 30 % hög (λ 0,15), 10–30 % medel (λ 0,35), 0–10 % låg (λ 0,6), "
+                   "&lt; 0 mycket låg (λ 1,0). Förmågan säger hur mycket risk ekonomin tål – din egen riskvilja kan "
+                   "vara lägre, och λ kan då sättas manuellt i profilen.</p>")
     return "".join([
         "<h2>Din ekonomi: belåningsgrad, amortering och betalningsförmåga</h2>",
         f"<p class='note'>Bostad {_kr(lan.bostadsvarde)} kr, lån {_kr(lan.belopp)} kr → belåningsgrad "
@@ -245,13 +260,14 @@ def ekonomi_sektion(a, df) -> str:
         f"70 %. Bostadsvärdet antas oförändrat ({lan.bostad_prisutveckling:.0f} %/år) och omvärderas vart 5:e år. "
         "Boendekostnad = ränta efter avdrag + amortering + övriga boendekostnader. Kvar att leva på = "
         "nettoinkomst − boendekostnad − levnadskostnader.</p>",
+        "<p class='note'>Inkomst netto = löner efter skatt + barnbidrag + hyresintäkt efter skatt (schablonavdrag "
+        "40 000 kr + 20 %). Boendekostnaden inkluderar även övriga lån på huset.</p>",
         "<h3>Amorteringsplan</h3><div class='wrap'>",
         _tabell(plan, {"Lån vid årets början kr": _kr, "Amortering under året kr": _kr, "Belåningsgrad": pct,
                        "Amorteringskrav": pct}), "</div>",
         "<h3>Betalningsförmåga per strategi (sannolikhetsviktad)</h3><div class='wrap'>",
         _tabell(kalp, fmt, index=False), "</div>",
-        "<h3>Stresstest: månadskostnad år 1 vid olika räntor</h3>",
-        "<p class='note'>Bankerna prövar normalt låntagare mot en kalkylränta runt 7 %.</p><div class='wrap'>",
+        "<h3>Riskprofil och stresstest (månad, år 1)</h3>", rp_html, "<div class='wrap'>",
         _tabell(stress, sfmt), "</div>",
     ])
 

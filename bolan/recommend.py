@@ -26,6 +26,7 @@ from .models import MalResultat, feature_importance, kor_alla, kor_makro, realti
 from .simulate import forvantad_bana, marknadens_bana, simulera, skatta_dynamik
 from .strategies import Bank, Lan, amorteringsplan, standardstrategier, stresstest, utvardera
 from . import risk as RK
+from .hushall import riskprofil, stresstabell
 
 HALVERINGSTID_AR = 10    # tidsviktning av träningsdata: vald i ablationsstudien (docs/UTREDNING.md)
 
@@ -39,6 +40,7 @@ class Profil:
     riskaversion: float = 0.25
     cvar_niva: float = 0.95
     scenarier: int = 3000
+    riskprofil: dict | None = None
 
 
 def las_profil(path: str | Path) -> Profil:
@@ -47,7 +49,15 @@ def las_profil(path: str | Path) -> Profil:
     lan = Lan(**c["lan"])
     banker = [Bank(**b) for b in c["bank"]]
     r = c.get("risk", {})
-    return Profil(lan, banker, r.get("riskaversion", 0.25), r.get("cvar_niva", 0.95), r.get("scenarier", 3000))
+    lam = r.get("riskaversion", 0.25)
+    rp = None
+    if lam == "auto":
+        from .hushall import riskprofil
+        rp = riskprofil(lan, lan.nuvarande_ranta or 3.0)
+        lam = rp["lambda"]
+    prof = Profil(lan, banker, float(lam), r.get("cvar_niva", 0.95), r.get("scenarier", 3000))
+    prof.riskprofil = rp
+    return prof
 
 
 STACK_MAL = ["dstyr_6", "dstyr_12", "dstyr_24", "dkpif_12"]
@@ -302,6 +312,7 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
                         rad["kvar_min_p5"] = RK.vkvantil(u["kvar_min"], W, 0.05)
                         rad["p_underskott"] = float(np.sum(W[u["kvar_min"] < 0]))
                         rad["boendeandel_max_p95"] = RK.vkvantil(u["boendeandel_max"], W, 0.95)
+                        rad["p_underskott_utan_hyra"] = float(np.sum(W[u["kvar_min_utan_hyra"] < 0]))
                     banor[(bank.namn, s.namn)] = u["snitt_bana"]
                     pv_alla[(bank.namn, s.namn)] = pv
                     snitt_alla[(bank.namn, s.namn)] = sr
@@ -386,7 +397,8 @@ def hushallsekonomi(lan: Lan, M: int) -> dict | None:
     ar.index = [f"År {i + 1}" for i in ar.index]
     inkomst_ar = (lan.bruttoinkomst_manad or 0) * 12
     return {
-        "plan": ar, "stress": stresstest(lan),
+        "plan": ar, "stress": stresstabell(lan, lan.nuvarande_ranta or 3.0),
+        "riskprofil": riskprofil(lan, lan.nuvarande_ranta or 3.0) if lan.nettoinkomst_manad else None,
         "belaningsgrad": lan.belopp / lan.bostadsvarde,
         "skuldkvot": lan.belopp / inkomst_ar if inkomst_ar else np.nan,
         "ar_till_70": next((i for i, v in enumerate(ar["belaningsgrad"]) if v <= 0.70), None),
@@ -400,6 +412,13 @@ def sammanfatta(a: dict) -> list[str]:
     bast = df.iloc[0]
     nuv = a["nuvarande_bank"]
     ut = []
+    rp = prof.riskprofil
+    if rp:
+        ut.append(f"RISKPROFIL: riskbärande förmåga {rp['klass'].upper()} → λ = {prof.riskaversion}")
+        ut.append(f"  {rp['motivering']}")
+        ut.append("  Räntan där kvar att leva på når noll: " + ", ".join(
+            f"{k.lower()} {v:.1f} %" for k, v in rp["brytranta"].items()) +
+            f". Varje procentenhet högre ränta kostar ≈ {_kr(rp['kostnad_per_pe'])} kr/mån efter avdrag.")
     ut.append(f"REKOMMENDATION (riskaversion λ={prof.riskaversion}, horisont {prof.lan.horisont_ar} år):")
     ut.append(f"  → {bast['strategi']} hos {bast['bank']}"
               f"{' (FLYTTA)' if bast['flytt'] else ''}")
@@ -459,11 +478,8 @@ def sammanfatta(a: dict) -> list[str]:
             ut.append(f"  Betalningsförmåga ({bast['strategi']}): boendekostnad år 1 ≈ {_kr(bast['boende_ar1'])} kr/mån, "
                       f"högst {_kr(bast['boende_max_p95'])} kr/mån i 95 % av scenarierna "
                       f"({bast['boendeandel_max_p95']:.0%} av nettoinkomsten). "
-                      f"Sannolikhet för underskott efter levnadskostnader: {bast['p_underskott']:.1%}.")
-        st7 = ek["stress"].loc["7 %"]
-        if "Kvar att leva på kr/mån" in st7:
-            ut.append(f"  Stresstest 7 % ränta: boendekostnad {_kr(st7['Boendekostnad totalt kr/mån'])} kr/mån, "
-                      f"kvar att leva på {_kr(st7['Kvar att leva på kr/mån'])} kr/mån.")
+                      f"Sannolikhet för underskott: {bast['p_underskott']:.1%} med hyresintäkt, "
+                      f"{bast['p_underskott_utan_hyra']:.1%} utan.")
     sn = a["sannolikhet"]
     for h, t in sn["tabeller"].items():
         p = t["Använd sannolikhet"]
