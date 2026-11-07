@@ -10,6 +10,10 @@ from .data import TENORS
 PROGNOS_H = [3, 6, 12, 24, 36, 60]
 # Bindningstider (månader) där vi predikterar "bindningspremien i efterhand"
 BINDNING_K = {"1Y": 12, "2Y": 24, "3Y": 36, "5Y": 60}
+# Timing: förändring i bunden ränta de närmaste månaderna ("binda nu eller vänta?")
+FIX_TENORER = ["2Y", "3Y", "5Y"]
+FIX_H = [1, 3, 6]
+GENOMSLAG = 0.93   # historiskt genomslag styrränta -> rörlig bolåneränta (skattat i styrräntekanalen)
 
 
 def bygg_features(p: pd.DataFrame) -> pd.DataFrame:
@@ -29,7 +33,7 @@ def bygg_features(p: pd.DataFrame) -> pd.DataFrame:
     f["forvantan_2y"] = p["stat_2y"] - p["styrranta"]    # marknadens förväntade styrränteändring
     f["ssvx_styr"] = p["ssvx_3m"] - p["styrranta"]
     # Momentum
-    for c in ["bolan_3M", "bolan_5Y", "styrranta", "stat_2y", "bobl_5y", "de_10y", "us_10y"]:
+    for c in ["bolan_3M", "bolan_5Y", "styrranta", "stat_2y", "bobl_2y", "bobl_5y", "de_10y", "us_10y"]:
         for h in (3, 6, 12):
             f[f"d{h}_{c}"] = p[c] - p[c].shift(h)
     # Inflation och realränta
@@ -42,6 +46,24 @@ def bygg_features(p: pd.DataFrame) -> pd.DataFrame:
     f["vol_stat2"] = p["stat_2y_spann"].rolling(6).mean()
     # Nivå relativt lång historik (mean reversion-signal)
     f["r3_vs_5arsmedel"] = r3 - r3.rolling(60, min_periods=24).mean()
+    # --- Timingfeatures ---
+    # Bankernas marginal på bundna lån mot finansieringskostnaden (bostadsobligationer)
+    f["marg_fix_2Y"] = p["bolan_2Y"] - p["bobl_2y"]
+    f["marg_fix_3Y"] = p["bolan_3Y"] - (2 * p["bobl_2y"] + p["bobl_5y"]) / 3
+    for c in ("marg_fix_2Y", "marg_fix_3Y", "marginal_5Y"):
+        f[f"{c}_vs_12m"] = f[c] - f[c].rolling(12, min_periods=6).mean()   # avvikelse från normal marginal
+    # Kortsiktig momentum: bundna räntor följer obligationsräntorna med eftersläpning
+    for c in ("bobl_2y", "bobl_5y", "stat_2y", "stat_5y", "bolan_2Y", "bolan_3Y", "bolan_5Y"):
+        f[f"d1_{c}"] = p[c] - p[c].shift(1)
+    f["eftersl_5Y"] = (p["bobl_5y"] - p["bobl_5y"].shift(3)) - (p["bolan_5Y"] - p["bolan_5Y"].shift(3))
+    f["eftersl_2Y"] = (p["bobl_2y"] - p["bobl_2y"].shift(3)) - (p["bolan_2Y"] - p["bolan_2Y"].shift(3))
+    # Räntecykel: tid sedan senaste styrränteändring och dess riktning
+    d = p["styrranta"].diff().fillna(0)
+    andrad = d.abs() > 0.05
+    grupp = andrad.cumsum()
+    f["man_sedan_styrandring"] = grupp.groupby(grupp).cumcount().astype(float).clip(upper=60)
+    f["senaste_styrandring"] = d.where(andrad).ffill().fillna(0.0)
+    f["styr_12m_riktning"] = np.sign(p["styrranta"] - p["styrranta"].shift(12)).fillna(0.0)
     # Realekonomi och kärninflation (Riksbankens utfallsdata, med publiceringsfördröjning)
     if "kpifxe" in p:
         f["kpifxe_yoy"] = p["kpifxe"]
@@ -73,6 +95,9 @@ def bygg_mal(p: pd.DataFrame) -> pd.DataFrame:
         # > 0  => att binda hade varit billigare.
         snitt = r3[::-1].rolling(k).mean()[::-1].shift(-1)
         y[f"premie_{t}"] = snitt - p[f"bolan_{t}"]
+    for t in FIX_TENORER:
+        for h in FIX_H:
+            y[f"dfix_{t}_{h}"] = p[f"bolan_{t}"].shift(-h) - p[f"bolan_{t}"]
     return y
 
 
@@ -136,6 +161,30 @@ def realtidsprognoser(p: pd.DataFrame, prog: pd.DataFrame) -> pd.DataFrame:
     if "arbl" in p:
         ut["rb_darbl_12"] = [varde("rb_arbl", t, 12) for t in p.index] - p["arbl"]
     ut["har_rb_prognos"] = ut["rb_dstyr_12"].notna().astype(float)
+
+    # Ex ante-bindningspremie: förväntad snittränta rörligt under bindningstiden (via styrräntebanan
+    # och genomslaget) minus dagens bundna ränta. > 0 = bunden ränta billig relativt förväntningarna.
+    if "bolan_3M" in p and all(f"bolan_{t}" in p for t in BINDNING_K):
+        aktiv = {}
+        for serie in ("rb_styr", "mkt_styr"):
+            lista = banor.get(serie, [])
+            pubs = [pub for pub, _ in lista]
+            aktiv[serie] = [lista[np.searchsorted(pubs, t + pd.offsets.MonthEnd(0), side="right") - 1][1]
+                            if pubs and pubs[0] <= t + pd.offsets.MonthEnd(0) else None for t in p.index]
+        for i_t, t in enumerate(p.index):
+            r3, s0 = p["bolan_3M"].iloc[i_t], styr.iloc[i_t]
+            for serie, kort in (("rb_styr", "rb"), ("mkt_styr", "mkt")):
+                b = aktiv[serie][i_t]
+                for tn, k in BINDNING_K.items():
+                    if b is not None:
+                        idx = pd.date_range(t + pd.DateOffset(months=1), periods=k, freq="MS")
+                        bana = b.reindex(b.index.union(idx)).ffill().bfill().reindex(idx)
+                        snitt_styr = float(bana.mean())
+                    else:   # proxy före 2015: linjär bana mot 2-årsräntan över 24 mån, sedan flat
+                        mal = p["stat_2y"].iloc[i_t]
+                        j = np.arange(1, k + 1)
+                        snitt_styr = float(np.mean(s0 + (mal - s0) * np.minimum(j, 24) / 24))
+                    ut.loc[t, f"exante_{kort}_{tn}"] = r3 + GENOMSLAG * (snitt_styr - s0) - p[f"bolan_{tn}"].iloc[i_t]
     # Proxy före 2015: marknadens 2-årsränta minus styrränta, skalad till horisonten
     for h in STYR_H:
         proxy = (p["stat_2y"] - styr) * min(h, 24) / 24

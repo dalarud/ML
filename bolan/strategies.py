@@ -61,6 +61,9 @@ class Lan:
     barnbidrag_manad: float = 0.0               # skattefritt
     hyresintakt_manad: float = 0.0              # brutto; beskattas med schablonavdrag
     andra_lan_manad: float = 0.0                # amortering + ränta på övriga lån
+    # Alternativkostnader
+    alternativ_avkastning: float | None = None  # %/år efter skatt på alternativ placering (None = diskonteringsranta)
+    sannolikhet_losen_ar: float = 0.0           # årlig sannolikhet att lånet måste lösas i förtid (flytt, försäljning)
 
 
 def amorteringskrav_andel(ltv: float) -> float:
@@ -176,6 +179,12 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
 
     ranta = np.zeros((n, M))
     terminal_vinst = np.zeros(n)
+    alt = lan.alternativ_avkastning if lan.alternativ_avkastning is not None else lan.diskonteringsranta
+    df_alt = (1 + alt / 100) ** (-(manad + 1) / 12)
+    q_losen = 1 - (1 - lan.sannolikhet_losen_ar) ** (1 / 12)
+    brytkostnad = np.zeros(n)
+    # Bankens marginal mot bostadsobligationer idag (för jämförelseräntan vid RSE)
+    finansmarg = np.array([R0[i] - (bobl_nu.get(t, R0[i]) if bobl_nu else R0[i] - 1.0) for i, t in enumerate(TN)])
     if start > 0:
         ranta[:, :start] = lan.nuvarande_ranta
 
@@ -200,6 +209,13 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
                 f = 1.0 if tau == start else bank.befintlig_kund_rabattandel
             r = R[:, tau, k] + listpaslag[k] - rabatt[k] * f - ltv_rabatt(tau)
             r_del[:, tau - start:slut - start] = r[:, None]
+            # Flexibilitetskostnad: förväntad RSE om lånet måste lösas i förtid under bindningen
+            if k > 0 and q_losen > 0:
+                for m in range(tau, slut):
+                    kvar_m = tau + TM[k] - m
+                    jf = _tenorranta(R[:, m, :], kvar_m) - np.interp(kvar_m, TM, finansmarg) + lan.rse_paslag
+                    rse = saldo[m] * np.maximum(r - jf, 0) / 100 * kvar_m / 12
+                    brytkostnad += d.andel * q_losen * (1 - q_losen) ** m * rse * df_alt[m]
             # Värdet av låst ränta som löper efter horisonten (mark-to-market)
             if tau + TM[k] > M and k > 0:
                 kvar = tau + TM[k] - M
@@ -222,8 +238,10 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
             netto[:, sel] = kostnad_m[:, sel] * (1 - andel[:, None])
     else:
         netto = kostnad_m
-    df = (1 + lan.diskonteringsranta / 100) ** (-(manad + 1) / 12)
-    pv = netto @ df + engang - terminal_vinst * (1 - 0.3 * lan.ranteavdrag) * df[-1]
+    df = df_alt
+    pv = netto @ df + engang - terminal_vinst * (1 - 0.3 * lan.ranteavdrag) * df[-1] + brytkostnad
+    # Förmögenhetsvärde vid horisonten av räntekostnaderna om pengarna i stället placerats till alternativ avkastning
+    fv = netto @ ((1 + alt / 100) ** ((M - manad - 1) / 12))
     snittranta = (kostnad_m.sum(1) / (saldo.sum() / 1200)) if saldo.sum() > 0 else np.zeros(n)
     # Boendekostnad per månad (ränta efter avdrag + amortering + övrigt) och kvar att leva på
     boende = netto + plan["amortering"].values[None, :] + lan.ovriga_boendekostnader_manad + lan.andra_lan_manad
@@ -235,6 +253,8 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
         "engang": engang,
         "snitt_bana": ranta.mean(0),
         "boende_max": boende.max(1),
+        "brytkostnad": brytkostnad,
+        "fv_kostnad": fv,
         "boende_ar1": boende[:, :12].mean(1),
     }
     if lan.nettoinkomst_manad:

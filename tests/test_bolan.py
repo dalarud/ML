@@ -156,3 +156,38 @@ def test_riskprofil_klassning_foljer_marginal():
     assert rik["lambda"] < fattig["lambda"]
     assert rik["klass"] == "Hög" and fattig["klass"] == "Mycket låg"
     assert rik["brytranta"]["Med hyra"] > fattig["brytranta"]["Med hyra"]
+
+
+def test_brytkostnad_bara_for_bundet_och_vid_fallande_rantor():
+    n, M = 20, 61
+    R = np.full((n, M, 6), 4.0)
+    R[:, 12:, :] = 2.0                 # räntan faller efter ett år -> RSE om man löser bundet lån
+    b = Bank("A", {t: 4.0 for t in TN}, {t: 0.0 for t in TN}, nuvarande=True)
+    lan = Lan(belopp=2_000_000, ranteavdrag=False, horisont_ar=5, amorteringskrav=False, sannolikhet_losen_ar=0.10)
+    bobl = {t: 3.0 for t in TN}
+    rorlig = utvardera(Strategi("r", [Del(1, "3M")]), b, lan, R, bobl)
+    bunden = utvardera(Strategi("b", [Del(1, "5Y")]), b, lan, R, bobl)
+    assert rorlig["brytkostnad"].max() == 0
+    assert bunden["brytkostnad"].mean() > 0
+    lan0 = Lan(belopp=2_000_000, ranteavdrag=False, horisont_ar=5, amorteringskrav=False, sannolikhet_losen_ar=0.0)
+    assert utvardera(Strategi("b", [Del(1, "5Y")]), b, lan0, R, bobl)["brytkostnad"].max() == 0
+
+
+def test_formogenhetsvarde_okar_med_alternativ_avkastning():
+    R = _platt()
+    b = _bank()
+    s = Strategi("r", [Del(1, "3M")])
+    lag = utvardera(s, b, Lan(belopp=1_000_000, ranteavdrag=False, alternativ_avkastning=0.0), R)["fv_kostnad"].mean()
+    hog = utvardera(s, b, Lan(belopp=1_000_000, ranteavdrag=False, alternativ_avkastning=5.0), R)["fv_kostnad"].mean()
+    assert np.isclose(lag, 300_000) and hog > lag
+
+
+def test_vantekalkyl_tecken():
+    from bolan.timing import vantekalkyl
+    tim = {f"dfix_{t}_{h}": {"prognos": 0.0, "RMSE": 0.1, "anvands": True} for t in ["2Y", "3Y", "5Y"] for h in [1, 3]}
+    tim["dfix_3Y_1"]["prognos"] = 0.30          # bunden ränta väntas stiga kraftigt -> vänta inte
+    pers = {"3M": 3.0, "2Y": 3.2, "3Y": 3.2, "5Y": 3.4}
+    v = vantekalkyl(tim, pers, 1_000_000)
+    assert v.loc["3Y: vänta 1 mån", "Förväntad vinst av att vänta kr"] < 0
+    # oförändrad bunden ränta men rörligt billigare -> att vänta ger en liten vinst
+    assert v.loc["2Y: vänta 1 mån", "Förväntad vinst av att vänta kr"] > 0

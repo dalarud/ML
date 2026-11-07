@@ -272,6 +272,58 @@ def ekonomi_sektion(a, df) -> str:
     ])
 
 
+def timing_sektion(a, df) -> str:
+    tp = a.get("timing")
+    if not tp:
+        return ""
+    pe = lambda v: f"{v:+.2f}"
+    premie = tp["premie"]
+    rn = tp["regel_nu"]
+    bt = tp["backtest"].copy()
+    fix = tp["fix_validering"]
+    fix = fix[[i.startswith("dfix") for i in fix.index]].rename(columns={
+        "R2_oos": "R² OOS", "RMSE": "RMSE pe", "traff_riktning": "Rätt riktning", "utfall_om_signal_positiv": "Utfall om signal upp",
+        "utfall_om_signal_negativ": "Utfall om signal ned", "prognos_ml": "Prognos nu pe", "n": "Månader"})
+    vanta = tp["vanta"]
+    alt_kol = [c for c in ["forsakringspremie", "brytkostnad", "formogenhet_vs_rorlig", "forvantad_anger"] if c in df]
+    bank = df.iloc[0]["bank"]
+    alt = df[df["bank"] == bank].head(12)[["strategi"] + alt_kol].rename(columns={
+        "strategi": "Strategi", "forsakringspremie": "Försäkringspremie mot rörligt kr", "brytkostnad": "Förväntad brytkostnad kr",
+        "formogenhet_vs_rorlig": "Förmögenhet vid horisonten mot rörligt kr", "forvantad_anger": "Förväntad ånger kr"})
+    lan = a["profil"].lan
+    altr = lan.alternativ_avkastning if lan.alternativ_avkastning is not None else lan.diskonteringsranta
+    return "".join([
+        "<h2>Timing: bundet eller rörligt – och nu eller senare?</h2>",
+        f"<div class='rek'>Marknadsregeln säger nu: {'BIND ' + rn if rn != '3M' else 'RÖRLIGT'}</div>",
+        "<p class='note'>Ex ante-premie = förväntad snittränta på rörligt under bindningstiden (dagens rörliga ränta + "
+        "genomslag × styrräntebanan enligt marknadens prissättning respektive Riksbanken) minus dagens bundna ränta. "
+        "Positiv = bunden ränta är billig jämfört med förväntningarna. Marknadsregeln binder den tid där premien är "
+        "högst om den är positiv, annars rörligt. ML-prognosen för premien har ingen påvisad träffsäkerhet (R² ≤ 0) "
+        "och används därför inte i beslutet.</p>",
+        "<div class='wrap'>", _tabell(premie, {c: pe for c in premie.columns if "pe" in c} | {"ML R² out-of-sample": lambda v: f"{v:.2f}"}), "</div>",
+        "<h3>Beslutsbacktest 2008– på faktiska genomsnittsräntor (walk-forward)</h3>",
+        "<p class='note'>Varje regel fattar beslut med enbart den information som fanns då. Perfekt framförhållning "
+        "visar taket för vad timing kan ge. Observera perioduppdelningen: marknadsregelns vinst kommer nästan helt "
+        "från 2022 (band 5 år före höjningarna), och den förlorade mot statiska strategier 2008–2021. Med få beslut "
+        "är signalen vägledande, inte statistiskt bevisad.</p><div class='wrap'>",
+        _tabell(bt), "</div>",
+        "<h3>Binda nu eller vänta? Prognos för den bundna räntan</h3>",
+        "<p class='note'>Snåla modeller (obligationsräntornas rörelse, eftersläpning, bankmarginal, styrräntans riktning) "
+        "har viss förmåga att förutsäga den bundna räntan en månad framåt. Som beslutsregel ('vänta om den väntas sjunka') "
+        "förbättrade den inte backtestet – använd den som information.</p><div class='wrap'>",
+        _tabell(fix, {"Rätt riktning": lambda v: f"{v:.0%}", "Månader": lambda v: f"{int(v)}"}), "</div><div class='wrap'>",
+        _tabell(vanta, {"Bunden nu %": lambda v: f"{v:.2f}", "Ränteskillnad under väntan kr": _kr, "Förväntad vinst av att vänta kr": _kr,
+                        "P(väntan lönar sig)": lambda v: f"{v:.0%}", "Förväntad ändring i bunden ränta pe": pe}), "</div>",
+        "<h3>Alternativkostnad</h3>",
+        f"<p class='note'>Försäkringspremie = hur mycket mer strategin förväntas kosta än rörligt (nuvärde). Förväntad "
+        f"brytkostnad = ränteskillnadsersättning om lånet måste lösas i förtid ({lan.sannolikhet_losen_ar:.0%} per år). "
+        f"Förmögenhet vid horisonten = hur mycket mer (+) eller mindre (−) ni har efter {lan.horisont_ar} år jämfört med "
+        f"rörligt om kostnadsskillnaden i stället placerats till {altr:.1f} % per år. Ånger = merkostnad mot det val som "
+        "i efterhand var bäst.</p><div class='wrap'>",
+        _tabell(alt, {c: _kr for c in alt.columns if "kr" in c}, index=False), "</div>",
+    ])
+
+
 def bygg_rapport(a: dict, ut: Path) -> Path:
     df = a["resultat"]
     res = a["modeller"]
@@ -321,6 +373,7 @@ def bygg_rapport(a: dict, ut: Path) -> Path:
         "<h3>Listräntor %</h3><div class='wrap'>" + _tabell(lista) + "</div>",
         "<h3>Rabatter pe</h3><div class='wrap'>" + _tabell(rabatt) + "</div>",
         ekonomi_sektion(a, df),
+        timing_sektion(a, df),
         "<h2>2. Historik</h2>", diagram_historik(p),
         "<h2>3. Inflation och styrränta (steg 1 i ML-kedjan)</h2>",
         "<p class='note'>Styrräntan och KPIF-inflationen prognostiseras med samma ML-modeller (Ridge, Random "

@@ -26,6 +26,7 @@ from .models import MalResultat, feature_importance, kor_alla, kor_makro, realti
 from .simulate import forvantad_bana, marknadens_bana, simulera, skatta_dynamik
 from .strategies import Bank, Lan, amorteringsplan, standardstrategier, stresstest, utvardera
 from . import risk as RK
+from . import timing as TIM
 from .hushall import riskprofil, stresstabell
 
 HALVERINGSTID_AR = 10    # tidsviktning av träningsdata: vald i ablationsstudien (docs/UTREDNING.md)
@@ -75,7 +76,7 @@ def tranade_modeller(panel: pd.DataFrame, tvinga: bool = False, k: int = 5) -> d
             kanalen vägs mot den direkta ML-prognosen efter out-of-sample-träffsäkerhet.
     """
     prog = las_prognoser()
-    nyckel = (str(panel.index[-1].date()), len(panel), k, str(prog["publicerad"].max().date()), "v3")
+    nyckel = (str(panel.index[-1].date()), len(panel), k, str(prog["publicerad"].max().date()), "v4")
     if CACHE.exists() and not tvinga:
         with open(CACHE, "rb") as f:
             c = pickle.load(f)
@@ -93,8 +94,11 @@ def tranade_modeller(panel: pd.DataFrame, tvinga: bool = False, k: int = 5) -> d
     kanal = styrrantekanal(X2, Y, res, makro, jmf)
     print("Steg 5: sannolikhetsmodeller för ränteutvecklingen ...")
     sannolikhet = RK.skatta_sannolikheter(X2, Y, w, k=k)
+    print("Steg 6: timingmodeller och beslutsbacktest (bundet mot rörligt) ...")
+    timing = {"utv": TIM.utvardera(X2, Y, w)}
+    timing["backtest"], timing["backtest_val"] = TIM.beslutsbacktest(panel, X2, Y, w)
     fi = feature_importance(X2, Y["d3m_12"], w)
-    c = {"nyckel": nyckel, "resultat": res, "makro": makro, "makro_jmf": jmf, "kanal": kanal,
+    c = {"nyckel": nyckel, "timing": timing, "resultat": res, "makro": makro, "makro_jmf": jmf, "kanal": kanal,
          "sannolikhet": sannolikhet,
          "feature_importance": fi, "x_nu": X2.iloc[-1], "X": X2}
     with open(CACHE, "wb") as f:
@@ -306,6 +310,8 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
                     })
                     if profil.lan.budget_manad:
                         rad["p_over_budget"] = float(np.sum(W[u["max_manad"] > profil.lan.budget_manad]))
+                    rad["brytkostnad"] = RK.vmedel(u["brytkostnad"], W)
+                    rad["fv_kostnad"] = RK.vmedel(u["fv_kostnad"], W)
                     rad["boende_ar1"] = RK.vmedel(u["boende_ar1"], W)
                     rad["boende_max_p95"] = RK.vkvantil(u["boende_max"], W, 0.95)
                     if "kvar_min" in u:
@@ -344,6 +350,13 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
         m = (df["bank"] == k[0]) & (df["strategi"] == k[1])
         df.loc[m, "forvantad_anger"] = r["forvantad_anger"]
         df.loc[m, "anger_p95"] = r["anger_p95"]
+    # Alternativkostnad: förmögenhet vid horisonten jämfört med rörligt hos samma bank
+    for b in df["bank"].unique():
+        ref = df[(df["bank"] == b) & (df["strategi"] == "Rörlig 3 mån")]
+        if len(ref):
+            m = df["bank"] == b
+            df.loc[m, "formogenhet_vs_rorlig"] = ref["fv_kostnad"].iloc[0] - df.loc[m, "fv_kostnad"]
+            df.loc[m, "forsakringspremie"] = df.loc[m, "forvantad_kostnad"] - ref["forvantad_kostnad"].iloc[0]
     df = df.sort_values("poang").reset_index(drop=True)
     bast_bank = df.iloc[0]["bank"]
     matris, matris_p = RK.scenariomatris(
@@ -385,7 +398,28 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
             "modellvikt": {h: v.vikt_modell for h, v in sann.items()}},
         "scenariomatris": matris, "scenariomatris_p": matris_p,
         "ekonomi": hushallsekonomi(profil.lan, M - 1),
+        "timing": timingpanel(modeller, erbjud.loc[nuv.namn].to_dict(), profil.lan.belopp),
     }
+
+
+def timingpanel(mod: dict, pers: dict, saldo: float) -> dict:
+    """Bundet eller rörligt nu, och binda nu eller vänta – med bevisad träffsäkerhet."""
+    t = mod["timing"]
+    utv, x = t["utv"], mod["X"].iloc[-1]
+    premie = pd.DataFrame({tn: {
+        "Ex ante-premie, marknadens bana (pe)": float(x[f"exante_mkt_{tn}"]),
+        "Ex ante-premie, Riksbankens bana (pe)": float(x[f"exante_rb_{tn}"]),
+        "ML-prognos premie (pe)": utv[f"premie_{tn}"]["prognos_ml"],
+        "ML R² out-of-sample": utv[f"premie_{tn}"]["R2_oos"],
+        "Historiskt snitt (pe)": utv[f"premie_{tn}"]["langsiktigt_snitt"],
+    } for tn in BINDNING_K}).T
+    ex = premie["Ex ante-premie, marknadens bana (pe)"]
+    regel = ex.idxmax() if ex.max() > 0 else "3M"
+    fix = pd.DataFrame({m: {k: v for k, v in r.items() if k in ("R2_oos", "RMSE", "traff_riktning", "utfall_om_signal_positiv",
+                                                                  "utfall_om_signal_negativ", "prognos_ml", "n")}
+                        for m, r in utv.items()}).T
+    return {"premie": premie, "regel_nu": regel, "fix_validering": fix,
+            "vanta": TIM.vantekalkyl(utv, pers, saldo), "backtest": t["backtest"], "backtest_val": t["backtest_val"]}
 
 
 def hushallsekonomi(lan: Lan, M: int) -> dict | None:
@@ -480,6 +514,26 @@ def sammanfatta(a: dict) -> list[str]:
                       f"({bast['boendeandel_max_p95']:.0%} av nettoinkomsten). "
                       f"Sannolikhet för underskott: {bast['p_underskott']:.1%} med hyresintäkt, "
                       f"{bast['p_underskott_utan_hyra']:.1%} utan.")
+    tp = a["timing"]
+    rn = tp["regel_nu"]
+    bt = tp["backtest"]
+    mr = bt.loc["Marknadsregel (ex ante-premie)"]
+    ut.append(f"  TIMING: marknadsregeln säger {'BIND ' + rn if rn != '3M' else 'RÖRLIGT'} nu "
+              f"(ex ante-premie {tp['premie'].loc[rn, 'Ex ante-premie, marknadens bana (pe)']:+.2f} pe)" if rn != "3M" else
+              "  TIMING: marknadsregeln säger RÖRLIGT nu (ingen bindningstid är billig mot marknadens förväntningar).")
+    ut.append(f"    Backtest 2008–: {mr['snittränta %']:.2f} % mot {bt.loc['Förnya 1Y', 'snittränta %']:.2f} % (förnya 1 år) "
+              f"och {bt.loc['Förnya 3M', 'snittränta %']:.2f} % (rörligt) – men vinsten kommer nästan helt från 2022; "
+              f"få beslut, så signalen är vägledande, inte bevisad.")
+    vn = tp["vanta"]
+    tn = {"Bind 2 år": "2Y", "Bind 3 år": "3Y", "Bind 5 år": "5Y"}.get(" ".join(bast["strategi"].split()[:3]))
+    if tn and f"{tn}: vänta 1 mån" in vn.index:
+        r1 = vn.loc[f"{tn}: vänta 1 mån"]
+        ut.append(f"    Binda nu eller vänta 1 mån ({tn}): förväntad vinst av att vänta {_kr(r1['Förväntad vinst av att vänta kr'])} kr, "
+                  f"P(väntan lönar sig) {r1['P(väntan lönar sig)']:.0%}.")
+    if "brytkostnad" in bast:
+        ut.append(f"  ALTERNATIVKOSTNAD ({bast['strategi']}): försäkringspremie mot rörligt {_kr(bast.get('forsakringspremie', 0))} kr "
+                  f"(nuvärde), förväntad brytkostnad vid förtida lösen {_kr(bast['brytkostnad'])} kr, "
+                  f"förmögenhetseffekt vid horisonten {_kr(bast.get('formogenhet_vs_rorlig', 0))} kr mot rörligt.")
     sn = a["sannolikhet"]
     for h, t in sn["tabeller"].items():
         p = t["Använd sannolikhet"]

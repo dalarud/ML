@@ -16,7 +16,10 @@ nuvarande_ranta = 2.85           # din nuvarande ränta
 bundet_kvar_manader = 0          # månader kvar till villkorsändringsdag (0 = rörligt/fritt)
 ranteavdrag = true               # 30 % upp till 100 000 kr räntekostnad per låntagare, 21 % därutöver
 antal_lantagare = 2
-diskonteringsranta = 2.0         # för nuvärdesberäkning (%/år)
+diskonteringsranta = 2.0         # för nuvärdesberäkning (%/år) om alternativ_avkastning saknas
+# Alternativkostnader
+alternativ_avkastning = 2.5       # %/år efter skatt på pengar som annars kunnat placeras (sparkonto ~2, ISK/fond ~4–5)
+sannolikhet_losen_ar = 0.03       # årlig sannolikhet att lånet löses i förtid (flytt/försäljning) → RSE vid bundet
 rse_paslag = 1.0                 # påslag i jämförelseräntan för ränteskillnadsersättning (kontrollera med banken)
 
 # Hushållets ekonomi (kvar-att-leva-på-kalkyl)

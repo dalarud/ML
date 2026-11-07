@@ -189,3 +189,57 @@ Varje strategi körs hos varje bank i profilen → flyttanalys.
 * Historiska listräntor per bank (t.ex. bankernas egna snitträntor) för att modellera rabatter över tid.
 * Riksbankens räntebana och STIBOR/SWESTR-terminer som features.
 * Månatlig automatisk körning med notis när signalen för bindning ändras.
+
+## 9. Timing av bundet mot rörligt och alternativkostnad
+
+### Varför de generella modellerna inte räckte
+Med ~100 features och ~360 månader överanpassar de generella ML-modellerna. Bindningspremien
+(snitt rörligt under bindningstiden − bunden ränta idag) gick inte att förutsäga (R² ≤ 0), och i
+beslutsbacktestet var ML-timingen sämre än att alltid förnya 1 år.
+
+### Nya timingfeatures (realtid, utan framtidsinformation)
+* **Ex ante-bindningspremie**: förväntad snittränta på rörligt under bindningstiden enligt
+  marknadens respektive Riksbankens styrräntebana (via genomslaget 0,93) minus dagens bundna ränta.
+* **Bankens marginal på bundet** mot bostadsobligationer och dess avvikelse från de senaste 12 månaderna.
+* **Eftersläpning**: obligationsräntans rörelse som ännu inte slagit igenom i bolåneräntan.
+* **Räntecykel**: månader sedan senaste styrränteändring, dess storlek och riktning.
+
+### Snåla modeller (bolan/timing.py)
+Ridge, grunt Gradient Boosting och Random Forest med stora löv på 6–10 teoristyrda variabler.
+
+| Mål | R² OOS | Rätt riktning | Kommentar |
+|---|---|---|---|
+| Bunden ränta 2/3/5 år, nästa månad | 0,14–0,16 | 58–63 % | Verklig, måttlig förmåga |
+| Bunden ränta, 3 mån | 0,03–0,08 | 57–59 % | Svag |
+| Bindningspremie 1–5 år | ≤ 0,05 | – | Ingen påvisad förmåga – används inte |
+
+### Beslutsbacktest 2008– (walk-forward, faktiska SCB-räntor)
+
+| Regel | Snittränta | 2008–2014 | 2015–2021 | 2022– | Största 12m-ökning |
+|---|---|---|---|---|---|
+| Perfekt framförhållning (tak) | 2,12 % | 2,97 | 1,50 | 1,78 | 1,16 |
+| **Marknadsregel (ex ante-premie > 0)** | **2,32 %** | 3,48 | 1,62 | **1,63** | **0,11** |
+| Förnya 1 år (bästa statiska) | 2,50 % | 3,12 | 1,51 | 3,03 | 2,66 |
+| Rörligt | 2,60 % | 3,13 | 1,55 | 3,36 | 2,60 |
+| ML-timing (premiemodell) | 2,69 % | 3,44 | 1,67 | 3,09 | 2,66 |
+| Marknadsregel + vänta-signal | 2,81 % | 3,54 | 1,83 | 3,18 | 2,09 |
+
+Tolkning:
+* Marknadsregeln är den enda regel som slår statiska strategier (−0,18 pe/år, stabilt för trösklar
+  0–0,25 pe) och dämpar räntechocker kraftigt. **Men vinsten kommer nästan helt från ett beslut**
+  (5 år i januari 2022); 2008–2021 förlorade den. Med 8 beslut på 18 år är den vägledande, inte bevisad.
+* Mekanismen är rimlig: bundna räntor släpar efter marknadens förväntningar. När marknaden prisar in
+  höjningar som bolåneräntorna ännu inte speglar är bunden ränta "billig".
+* "Vänta en månad om den bundna räntan väntas sjunka" försämrade resultatet – prognosen redovisas som
+  information, inte som regel.
+
+### Alternativkostnad
+* **Försäkringspremie**: förväntad merkostnad (nuvärde) mot rörligt hos samma bank.
+* **Brytkostnad (flexibilitet)**: förväntad ränteskillnadsersättning om lånet måste lösas i förtid –
+  `sannolikhet_losen_ar` per år; jämförelseränta = marknadsränta för återstående tid − bankens marginal
+  mot bostadsobligationer + `rse_paslag`. Ingår i kostnaden och poängen.
+* **Kapitalkostnad**: alla kostnader diskonteras med `alternativ_avkastning`, och skillnaden mot rörligt
+  redovisas som förmögenhet vid horisonten om pengarna i stället placerats.
+* **Väntekostnad**: förväntad vinst av att ligga rörligt 1–3 månader och sedan binda =
+  ränteskillnad under väntan − bindningstid × förväntad förändring i bunden ränta, med sannolikhet
+  från prognosens out-of-sample-fel.
