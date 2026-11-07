@@ -94,6 +94,68 @@ för rörlig ränta på 3–24 mån blir en viktning av den direkta ML-prognosen
 styrränteprognos, med vikter efter out-of-sample-fel. Ett extra scenario, "Riksbankens räntebana", används i
 robusthetskontrollen.
 
+## 4c. Förfining av dataanvändningen – ablationsstudie
+
+Nya data: realekonomi och kärninflation ur Riksbankens prognos-API (KPIF exkl. energi, BNP-tillväxt,
+BNP-gap, arbetslöshet; utfall med publiceringsfördröjning + Riksbankens realtidsprognoser för dem) och
+kronans växelkurs (KIX). Nya metodval: PCA före det neurala nätet och tidsviktning av träningsdata.
+
+Varje förändring prövades för sig med samma purged walk-forward-validering (R² out-of-sample, ensemble):
+
+| Konfiguration | rörlig 6m | rörlig 12m | styr 6m | styr 12m | KPIF 12m | premie 2år | **snitt** |
+|---|---|---|---|---|---|---|---|
+| A: ursprungliga features | 0,35 | 0,26 | 0,39 | 0,32 | 0,19 | 0,00 | 0,251 |
+| B: + realekonomi/kärninfl./KIX | 0,27 | 0,18 | 0,17 | 0,12 | 0,02 | 0,04 | 0,130 |
+| C: B + PCA i neuralt nät | 0,24 | 0,26 | 0,17 | 0,27 | 0,27 | 0,04 | 0,204 |
+| **D: C + tidsvikt (halveringstid 10 år)** | 0,32 | **0,36** | 0,35 | **0,38** | 0,21 | 0,00 | **0,268** |
+| E: C + tidsvikt 5 år | 0,27 | 0,33 | 0,26 | 0,32 | 0,07 | 0,04 | 0,216 |
+| F: A + PCA + tidsvikt 10 år | 0,28 | 0,25 | 0,25 | 0,24 | 0,12 | 0,00 | 0,190 |
+| G: F + bara kärninflation | 0,32 | 0,30 | 0,29 | 0,22 | 0,11 | 0,08 | 0,220 |
+
+Slutsatser:
+* **Mer data är inte automatiskt bättre.** Fler makroserier utan tidsviktning (B) försämrade alla mål – med
+  ~360 månader blir extra brusiga variabler dyra.
+* **Tidsviktning (10 år) är den viktigaste förbättringen**: modellerna lär mer av de senaste
+  räntecyklerna. D valdes (bäst i snitt och på de viktigaste målen, rörlig ränta och styrränta 12 mån).
+* Skillnaderna mellan konfigurationerna ligger nära bruset, och att välja den bästa av sju ger en viss
+  optimism. Valet bör omprövas när mer data finns.
+* **Tidsviktningen gäller inte den långsiktiga bindningspremien** som marknadens implicita bana bygger på –
+  den skattas oviktat över 1996–, eftersom kortare perioder domineras av enstaka episoder (2014– innehåller
+  bara en höjningscykel och ger en missvisande positiv premie).
+* Utfallsdata för BNP/arbetslöshet är *reviderade* siffror, inte de som fanns i realtid → viss optimism i
+  valideringen för de variablerna.
+
+## 4d. Riskbedömning med sannolikheter för ränteutvecklingen
+
+Tidigare viktades alla simulerade scenarier lika. Nu:
+
+1. **Sannolikhetsmodell.** ML-klassificerare (Random Forest + regulariserad logistisk regression) skattar
+   sannolikheten för fem utfall för rörlig bolåneränta om 12 och 36 mån: kraftig nedgång (< −1 pe),
+   nedgång (−1 till −0,25), oförändrad (±0,25), uppgång (0,25–1), kraftig uppgång (> 1 pe).
+   Validering med Brier-poäng på purged walk-forward:
+   * 12 mån: Brier 0,84 mot 0,91 för historisk basfrekvens → **skill score 0,08** (påvisad träffsäkerhet).
+   * 36 mån: skill score ≈ 0 → ingen påvisad träffsäkerhet.
+2. **Skicklighetsviktning.** Andelen ML i sannolikheten väljs på out-of-sample-data (12 mån: 80 %,
+   36 mån: 20 %). Resten kommer från simuleringens egen fördelning (centrerad på huvudbanan) – inte från
+   historisk basfrekvens, som speglar 30 år av fallande räntor.
+3. **Omviktning av scenarier** (raking): varje simulerad ränteutveckling får en vikt så att andelen scenarier
+   i varje utfallsklass, på både 12 och 36 mån, matchar sannolikheterna. Effektivt antal scenarier efter
+   omviktning redovisas (≈ 1 900 av 3 000, dvs. ingen extrem omviktning).
+4. **Sannolikhetsviktade riskmått:** förväntad kostnad, kvantiler, CVaR, sannolikhet att överskrida budget.
+   Nya mått: **scenariomatris** (snittränta per strategi i varje utfall, med sannolikhet),
+   **förväntad ånger** (merkostnad mot det val som i efterhand var bäst) och **P(billigare än rörligt)**.
+
+## 4e. Vad som fortfarande saknas
+
+| Saknas | Betydelse | Hur det kan läggas till |
+|---|---|---|
+| Din belåningsgrad (bostadens värde) | Banker ger lägre ränta under 50–60 % belåning; amorteringskrav | `bostadsvarde` i profilen + räntetrappa per belåningsgrad |
+| Din inkomst / kvar-att-leva-på | Betalningsrisk: klarar du 6–7 % ränta? | Inkomst och utgifter i profilen → sannolikhet för likviditetsproblem |
+| Bankernas historiska listräntor och rabatter | Rabattens utveckling över tid modelleras nu med antaganden | Handelsbankens API ger list- och snitträntor per månad – kan samlas in löpande |
+| Hushållens/företagens inflationsförväntningar (Prospera) | Ledande indikator för inflation och styrränta | Riksbankens/Kantar Sifos publicerade serier |
+| SWESTR-terminer | Marknadens styrränteförväntningar dagligen | Används nu kvartalsvis via Riksbankens marknadsprisserie |
+| Realtidsversioner av BNP/arbetslöshet | Undviker revideringsoptimism | Riksbankens prognosomgångar innehåller dem från 2015 |
+
 ## 5. Design som följer av analysen
 
 1. **Skicklighetsviktad förväntad bana:** för varje horisont vägs ML-ensemblen mot marknadens implicita

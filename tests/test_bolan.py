@@ -87,3 +87,35 @@ def test_realtids_stack_ingen_framtidsinformation():
     Y2.iloc[100:] = 99.0
     b = realtids_stack(X, Y2, w, ["dstyr_12"])
     assert np.allclose(a.iloc[:100], b.iloc[:100])
+
+
+def test_klassa_granser():
+    from bolan.risk import klassa
+    assert list(klassa(np.array([-2, -0.5, 0, 0.5, 2]))) == [0, 1, 2, 3, 4]
+
+
+def test_omviktning_traffar_malsannolikheter():
+    from bolan.risk import klassa, omvikta
+    rng = np.random.default_rng(1)
+    n, M = 4000, 40
+    R = np.zeros((n, M, 6))
+    R[:, :, 0] = 3.0 + np.cumsum(rng.normal(0, 0.25, (n, M)), axis=1) - rng.normal(0, 0.25, (n, 1)) * 0
+    R[:, 0, 0] = 3.0
+    mal = {12: np.array([0.05, 0.15, 0.2, 0.3, 0.3]), 36: np.array([0.2, 0.2, 0.2, 0.2, 0.2])}
+    w, ess = omvikta(R, mal)
+    for h, p in mal.items():
+        akt = np.bincount(klassa(R[:, h, 0] - 3.0), weights=w, minlength=5)
+        assert np.allclose(akt, p, atol=0.02)
+    assert 0 < ess <= n and np.isclose(w.sum(), 1)
+
+
+def test_viktade_riskmatt():
+    from bolan.risk import vcvar, vkvantil, vmedel
+    x = np.arange(100, dtype=float)
+    w = np.full(100, 0.01)
+    assert np.isclose(vmedel(x, w), 49.5)
+    assert np.isclose(vcvar(x, w, 0.95), np.mean(x[95:]), atol=0.6)
+    assert vkvantil(x, w, 0.5) in (49.0, 50.0)
+    # Mer vikt på höga utfall höjer väntevärdet
+    w2 = np.where(x >= 50, 0.015, 0.005)
+    assert vmedel(x, w2 / w2.sum()) > 49.5

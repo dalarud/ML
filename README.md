@@ -13,7 +13,7 @@ SCB + Riksbanken + Riksbankens prognosomgångar (räntebana, KPIF, marknadsförv
         │
 Steg 1: ML-prognoser för styrränta och KPIF-inflation ──► jämförs/kombineras med Riksbanken & marknaden
         │  (walk-forward-prognoser som features)
-Steg 2: features (~70 st) ─► Ridge / Random Forest / Gradient Boosting / Neuralt nät
+Steg 2: features (~80 st, tidsviktade) ─► Ridge / Random Forest / Gradient Boosting / Neuralt nät
                               └─ purged walk-forward k-fold, ensemble
                               └─ + styrräntekanal (genomslag styrränta → rörlig bolåneränta)
                                                    │
@@ -21,9 +21,12 @@ Steg 2: features (~70 st) ─► Ridge / Random Forest / Gradient Boosting / Neu
                                                    │
                          block-bootstrap ──► 3 000 scenarier för hela räntekurvan
                                                    │
+       ML-klassificerare ──► sannolikheter (5 utfall, 12/36 mån) ──► omviktning av scenarierna
+                                                   │
         din profil (lån, banker, listräntor, rabatter, risk) ──► ~50 strategier × banker
                                                    │
-                     E[kostnad] + λ·(CVaR95 − E[kostnad])  ──► rekommendation + HTML-rapport
+     sannolikhetsviktat E[kostnad] + λ·(CVaR95 − E[kostnad]), scenariomatris, ånger
+                                                   ──► rekommendation + HTML-rapport
 ```
 
 ## Kom igång

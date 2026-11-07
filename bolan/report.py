@@ -130,6 +130,25 @@ def diagram_kpif(a):
     return _png(fig)
 
 
+def diagram_sannolikhet(a):
+    tab = a["sannolikhet"]["tabeller"]
+    fig, axes = plt.subplots(1, len(tab), figsize=(9, 3.2), sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, (h, t) in zip(axes, tab.items()):
+        x = np.arange(len(t))
+        b = 0.26
+        for i, (kol, f) in enumerate([("Historisk basfrekvens", "#b9b8b2"), ("Simulering (före viktning)", FARG[1]),
+                                      ("Använd sannolikhet", FARG[0])]):
+            ax.bar(x + (i - 1) * b, t[kol].values * 100, width=b - 0.03, color=f, label=kol)
+        ax.set_xticks(x, [k.replace(" ", "\n") for k in t.index], fontsize=7.5)
+        ax.set_title(f"Rörlig bolåneränta om {h} mån", fontsize=9.5, color=TEXT2)
+        ax.grid(axis="x", visible=False)
+    axes[0].set_ylabel("Sannolikhet, %")
+    h, l = axes[0].get_legend_handles_labels()
+    fig.legend(h, l, fontsize=8, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.06))
+    return _png(fig)
+
+
 def diagram_feature(fi: pd.Series):
     fig, ax = plt.subplots(figsize=(6.5, 3.6))
     fi = fi.iloc[::-1]
@@ -269,22 +288,52 @@ def bygg_rapport(a: dict, ut: Path) -> Path:
         "styrränteförändring. vikt_kanal = andel av bolåneprognosen som går via styrräntan (resten är den "
         "direkta ML-prognosen).</p>",
         "<div class='wrap'>" + _tabell(a["makro"]["kanal"], {"n": lambda v: "" if pd.isna(v) else f"{int(v)}"}) + "</div>",
-        "<h2>4. Prognos för rörlig bolåneränta</h2>",
+        "<h2>4. Sannolikheter för ränteutvecklingen</h2>",
+        "<p class='note'>ML-klassificerare (Random Forest och logistisk regression) skattar sannolikheten för fem "
+        "utfall: kraftig nedgång (&lt; −1 pe), nedgång (−1 till −0,25), oförändrad (±0,25), uppgång (0,25–1) och "
+        "kraftig uppgång (&gt; 1 pe). De utvärderas med Brier-poäng mot historisk basfrekvens på samma "
+        "out-of-sample-månader. Modellen får påverka sannolikheterna i den mån den bevisat träffsäkerhet; "
+        "scenarierna viktas sedan om så att de matchar sannolikheterna, och alla kostnads- och riskmått "
+        "nedan är sannolikhetsviktade.</p>",
+        diagram_sannolikhet(a),
+        "".join("<h3>Om " + str(h) + " månader</h3><div class='wrap'>" + _tabell(t, {c: (lambda v: f"{v:.0%}") for c in t.columns}) + "</div>"
+                for h, t in a["sannolikhet"]["tabeller"].items()),
+        "<h3>Validering av sannolikhetsmodellerna (Brier-poäng, lägre är bättre)</h3>",
+        "<div class='wrap'>" + _tabell(a["sannolikhet"]["validering"].T, {"n_manader": lambda v: f"{int(v)}"}) + "</div>",
+        f"<p class='note'>Effektivt antal scenarier efter omviktning: {a['sannolikhet']['ess']:.0f} av "
+        f"{len(a['sannolikhet']['vikter'])}.</p>",
+        "<h2>5. Prognos för rörlig bolåneränta</h2>",
         "<p class='note'>Huvudscenariot kombinerar den direkta ML-prognosen med styrräntekanalen och väger sedan mot marknadens implicita bana per horisont, med vikt efter bevisad träffsäkerhet out-of-sample (ML-vikt = 1 vid R² ≥ 0,25). Banden visar "
         f"{prof.scenarier} block-bootstrapscenarier.</p>",
         diagram_prognos(a), "<div class='wrap'>" + _tabell(a["prognos"]) + "</div>",
         "<h3>Bindningssignaler</h3><p class='note'>Bindningspremie = genomsnittlig rörlig ränta under "
         "bindningstiden minus bunden ränta idag. Positiv = att binda förväntas bli billigare.</p>",
         "<div class='wrap'>" + _tabell(sig) + "</div>",
-        "<h2>5. Strategier – kostnad mot risk</h2>",
+        "<h2>6. Strategier – kostnad mot risk</h2>",
         f"<p class='note'>Varje punkt är en strategi hos {html.escape(bast_bank)}. Längre ner till vänster är "
-        "bättre. Poäng = förväntad kostnad + λ·(CVaR − förväntad kostnad).</p>",
+        "bättre. Poäng = förväntad kostnad + λ·(CVaR − förväntad kostnad), där både förväntad kostnad och CVaR är "
+        "sannolikhetsviktade.</p>",
         diagram_risk(df, bast_bank),
         "<div class='wrap'>" + _tabell(visa, krf, index=False) + "</div>",
         "<h3>Kostnadsspridning för de bästa strategierna</h3>", diagram_fordelning(df, a),
+        "<h3>Scenariomatris: snittränta % per ränteutveckling (rörlig ränta om 3 år)</h3>",
+        "<p class='note'>Rubrikerna visar sannolikheten för varje utfall. Läs raden för en strategi: så här "
+        "hade din snittränta blivit om räntan utvecklas så. Hos " + html.escape(df.iloc[0]["bank"]) + ".</p>",
+        "<div class='wrap'>" + _tabell(a["scenariomatris"].loc[[s for s in df[df["bank"] == df.iloc[0]["bank"]]["strategi"].head(12)]]
+                                       .rename(columns={k: f"{k} ({v:.0%})" for k, v in a["scenariomatris_p"].items()})) + "</div>",
+        "<h3>Ånger och sannolikhet att slå rörligt</h3>",
+        "<p class='note'>Förväntad ånger = genomsnittlig merkostnad jämfört med den strategi som i efterhand hade "
+        "varit billigast i samma scenario. P(billigare än rörligt) = sannolikheten att strategin blir billigare än "
+        "rörlig ränta hos samma bank.</p>",
+        "<div class='wrap'>" + _tabell(df.head(12)[["bank", "strategi", "p_billigare_an_rorlig", "forvantad_anger", "anger_p95"]]
+                                       .rename(columns={"bank": "Bank", "strategi": "Strategi",
+                                                        "p_billigare_an_rorlig": "P(billigare än rörligt)",
+                                                        "forvantad_anger": "Förväntad ånger kr", "anger_p95": "Ånger P95 kr"}),
+                                       {"P(billigare än rörligt)": lambda v: "–" if pd.isna(v) else f"{v:.0%}", "Förväntad ånger kr": _kr,
+                                        "Ånger P95 kr": _kr}, index=False) + "</div>",
         "<h3>Robusthet: förväntad kostnad (kr) under alternativa scenarier</h3>",
         "<div class='wrap'>" + _tabell(robust, {c: _kr for c in robust.columns[2:]}, index=False) + "</div>",
-        "<h2>6. Modellvalidering (purged walk-forward k-fold, k=5)</h2>",
+        "<h2>7. Modellvalidering (purged walk-forward k-fold, k=5)</h2>",
         "<p class='note'>R² out-of-sample relativt naiv prognos (ingen förändring / historiskt snitt). "
         "&gt; 0 betyder att modellen slår den naiva prognosen på data den aldrig sett. Kolumnerna "
         "”blandad k-fold” visar vad vanlig slumpmässig k-fold felaktigt hade rapporterat – läckage "
@@ -292,18 +341,21 @@ def bygg_rapport(a: dict, ut: Path) -> Path:
         "<div class='wrap'>" + _tabell(cvtab) + "</div>",
         "<h3>Träffsäkerhet i riktning (andel rätt tecken)</h3><div class='wrap'>" + _tabell(trf) + "</div>",
         "<h3>Viktigaste förklaringsvariabler</h3>", diagram_feature(a["feature_importance"]),
-        "<h2>7. Historisk backtest</h2>",
+        "<h2>8. Historisk backtest</h2>",
         "<p class='note'>Faktiska genomsnittsräntor (SCB). Rullande 5-årsfönster sedan 2005: snittränta om man "
         "alltid förnyat samma bindningstid.</p>", diagram_backtest(rf),
         "<div class='wrap'>" + _tabell(vinnare.to_frame(), {vinnare.name: lambda v: f"{v:.0%}"}) + "</div>",
         "<h3>ML-timing (walk-forward) mot statiska strategier, 2008–</h3>",
         "<div class='wrap'>" + _tabell(bt) + "</div>",
-        "<h2>8. Metod och begränsningar</h2>",
+        "<h2>9. Metod och begränsningar</h2>",
         "<ul class='note'><li>Räntor är svåra att förutsäga: modellerna har påvisbar förmåga på 3–12 månader men "
         "inte på flera års sikt. Därför bygger rekommendationen på riskjusterad kostnad över tusentals scenarier, "
         "inte på en enskild prognos.</li><li>Före 2005 (och för vissa bindningstider före 2014) är "
         "bolåneräntorna rekonstruerade från marknadsräntor och väger hälften i träningen.</li>"
-        "<li>”10 år” bygger på SCB:s kategori ”över 5 år”.</li><li>Ränteskillnadsersättning är förenklad – "
+        "<li>”10 år” bygger på SCB:s kategori ”över 5 år”.</li>"
+        "<li>Sannolikheterna kommer från ML-klassificerare med påvisad träffsäkerhet på 12 mån (Brier skill "
+        "≈ 0,08) men inte på 36 mån; där bygger de i huvudsak på simuleringen. Utfallsdata för BNP och "
+        "arbetslöshet är reviderade siffror.</li><li>Ränteskillnadsersättning är förenklad – "
         "begär alltid bankens exakta beräkning.</li><li>Verktyget är ett beslutsstöd, inte finansiell "
         "rådgivning.</li></ul>",
     ]

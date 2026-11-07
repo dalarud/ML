@@ -51,6 +51,7 @@ RIKSBANK_SERIES = {
     "DEGVB10Y": "de_10y",
     "USGVB10Y": "us_10y",
     "EMGVB5Y": "eu_5y",
+    "SEKKIX92": "kix",
 }
 
 SWEA = "https://api.riksbank.se/swea/v1"
@@ -128,7 +129,14 @@ PROGNOS_SERIER = {
     "SEQRATENAYNA": "rb_styr",     # Riksbankens räntebana (kvartal)
     "SEMCPIFNAYNA": "rb_kpif",     # Riksbankens KPIF-prognos, årstakt (månad)
     "SEDMENAYNA": "mkt_styr",      # Marknadens prissatta styrränteförväntningar (kvartal)
+    "SEMCPIFFEXYNA": "rb_kpifxe",  # KPIF exkl. energi (kärninflation), årstakt (månad)
+    "SEQGDPNAYSA": "rb_bnp",       # BNP-tillväxt, årstakt (kvartal)
+    "SEQGDPGAPYSA": "rb_bnpgap",   # BNP-gap, % (kvartal)
+    "SEQLABUEASA": "rb_arbl",      # Arbetslöshet, % (kvartal)
+    "SEAWAGKLYNA": "rb_lon",       # Timlön (konjunkturlönestatistik), årstakt
 }
+# Publiceringsfördröjning (månader efter periodens slut) för utfall ur prognos-API:t
+PUBL_LAG = {"rb_kpifxe": 0, "rb_bnp": 2, "rb_bnpgap": 2, "rb_arbl": 1, "rb_lon": 2}
 
 
 def hamta_riksbank_prognoser() -> pd.DataFrame:
@@ -152,6 +160,40 @@ def hamta_riksbank_prognoser() -> pd.DataFrame:
     df = pd.DataFrame(rader, columns=["serie", "omgang", "publicerad", "cutoff", "datum", "varde"])
     df.to_csv(RAW / "riksbank_prognoser.csv", index=False)
     return df
+
+
+def hamta_serie_riksbanken(sid: str, namn: str, start: str = "1985-01-01") -> None:
+    """Hämta en enskild SWEA-serie och lägg till den i riksbanken_manad.csv."""
+    slut = pd.Timestamp.today().strftime("%Y-%m-%d")
+    rows = _get(f"{SWEA}/ObservationAggregates/{sid}/M/{start}/{slut}")
+    df = pd.DataFrame(rows)
+    df["datum"] = pd.to_datetime(df["from"]).dt.to_period("M").dt.to_timestamp()
+    df = df.set_index("datum")
+    ny = pd.concat([df["average"].rename(namn), (df["max"] - df["min"]).rename(f"{namn}_spann")], axis=1)
+    p = RAW / "riksbanken_manad.csv"
+    gammal = pd.read_csv(p, index_col=0, parse_dates=True)
+    gammal = gammal.drop(columns=[c for c in ny.columns if c in gammal.columns])
+    gammal.join(ny, how="outer").sort_index().to_csv(p)
+
+
+def makroutfall(prog: pd.DataFrame) -> pd.DataFrame:
+    """Utfallshistorik (realekonomi) ur senaste prognosomgången, med publiceringsfördröjning.
+
+    Historiken i senaste omgången är reviderad data. Det ger en viss optimism i
+    backtester (revideringar var inte kända i realtid), vilket dokumenteras.
+    """
+    ut = {}
+    for serie, lag in PUBL_LAG.items():
+        g = prog[prog["serie"] == serie]
+        if g.empty:
+            continue
+        senast = g[g["publicerad"] == g["publicerad"].max()]
+        hist = senast[senast["datum"] <= senast["cutoff"]]
+        s = hist.set_index(hist["datum"].dt.to_period("M").dt.to_timestamp())["varde"].sort_index()
+        s.index = s.index + pd.DateOffset(months=lag)   # känt först efter publicering
+        idx = pd.date_range(s.index.min(), s.index.max() + pd.DateOffset(months=3), freq="MS")
+        ut[serie.replace("rb_", "")] = s.reindex(idx).ffill(limit=3)
+    return pd.DataFrame(ut)
 
 
 def las_prognoser() -> pd.DataFrame:
@@ -193,6 +235,10 @@ def bygg_panel(med_proxy: bool = True) -> pd.DataFrame:
     kpif = _las("scb_kpif.csv")
 
     panel = rb.join(bol, how="outer").join(kpif, how="outer").sort_index()
+    try:
+        panel = panel.join(makroutfall(las_prognoser()), how="left")
+    except FileNotFoundError:
+        pass
     panel = panel[panel.index >= "1994-01-01"]
     panel["kpif_yoy"] = panel["kpif"].pct_change(12, fill_method=None) * 100
     panel["kpif_3m_ann"] = ((panel["kpif"] / panel["kpif"].shift(3)) ** 4 - 1) * 100

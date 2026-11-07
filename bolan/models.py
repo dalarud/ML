@@ -21,9 +21,13 @@ from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from .features import BINDNING_K, KPIF_H, PROGNOS_H, STYR_H
+
+
+NN_PCA = True   # komprimera features med PCA före det neurala nätet (färre parametrar)
 
 
 def modellkatalog(seed: int = 0) -> dict:
@@ -34,7 +38,8 @@ def modellkatalog(seed: int = 0) -> dict:
         "gradient_boosting": HistGradientBoostingRegressor(
             max_iter=300, learning_rate=0.03, max_depth=3, min_samples_leaf=15,
             l2_regularization=1.0, random_state=seed),
-        "neuralt_nat": make_pipeline(StandardScaler(), MLPRegressor(
+        "neuralt_nat": make_pipeline(StandardScaler(), *([PCA(n_components=0.95, random_state=seed)] if NN_PCA else []),
+                                     MLPRegressor(
             hidden_layer_sizes=(16,), alpha=5.0, learning_rate_init=1e-3,
             max_iter=3000, early_stopping=True, validation_fraction=0.15,
             n_iter_no_change=50, random_state=seed)),

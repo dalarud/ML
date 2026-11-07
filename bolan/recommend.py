@@ -21,10 +21,13 @@ import numpy as np
 import pandas as pd
 
 from .data import ROOT, TENORS, bygg_panel, las_prognoser
-from .features import BINDNING_K, KPIF_H, PROGNOS_H, STYR_H, dataset_makro, _manadsbana
+from .features import BINDNING_K, KPIF_H, PROGNOS_H, STYR_H, bygg_mal, dataset_makro, _manadsbana
 from .models import MalResultat, feature_importance, kor_alla, kor_makro, realtids_stack, riktmarken
 from .simulate import forvantad_bana, marknadens_bana, simulera, skatta_dynamik
 from .strategies import Bank, Lan, standardstrategier, utvardera
+from . import risk as RK
+
+HALVERINGSTID_AR = 10    # tidsviktning av träningsdata: vald i ablationsstudien (docs/UTREDNING.md)
 
 CACHE = ROOT / "data" / "modellcache.pkl"
 
@@ -62,14 +65,14 @@ def tranade_modeller(panel: pd.DataFrame, tvinga: bool = False, k: int = 5) -> d
             kanalen vägs mot den direkta ML-prognosen efter out-of-sample-träffsäkerhet.
     """
     prog = las_prognoser()
-    nyckel = (str(panel.index[-1].date()), len(panel), k, str(prog["publicerad"].max().date()), "v2")
+    nyckel = (str(panel.index[-1].date()), len(panel), k, str(prog["publicerad"].max().date()), "v3")
     if CACHE.exists() and not tvinga:
         with open(CACHE, "rb") as f:
             c = pickle.load(f)
         if c.get("nyckel") == nyckel:
             return c
     print("Steg 1: makromodeller för styrränta och inflation ...")
-    X, Y, w = dataset_makro(panel, prog)
+    X, Y, w = dataset_makro(panel, prog, HALVERINGSTID_AR)
     makro, jmf = kor_makro(X, Y, w, k=k)
     print("Steg 2: realtidsprognoser från makromodellerna som features ...")
     stack = realtids_stack(X, Y, w, STACK_MAL)
@@ -78,8 +81,11 @@ def tranade_modeller(panel: pd.DataFrame, tvinga: bool = False, k: int = 5) -> d
     res = kor_alla(X2, Y, w, k=k)
     print("Steg 4: styrräntekanalen ...")
     kanal = styrrantekanal(X2, Y, res, makro, jmf)
+    print("Steg 5: sannolikhetsmodeller för ränteutvecklingen ...")
+    sannolikhet = RK.skatta_sannolikheter(X2, Y, w, k=k)
     fi = feature_importance(X2, Y["d3m_12"], w)
     c = {"nyckel": nyckel, "resultat": res, "makro": makro, "makro_jmf": jmf, "kanal": kanal,
+         "sannolikhet": sannolikhet,
          "feature_importance": fi, "x_nu": X2.iloc[-1], "X": X2}
     with open(CACHE, "wb") as f:
         pickle.dump(c, f)
@@ -136,7 +142,19 @@ def _cvar(x: np.ndarray, a: float) -> float:
     return float(x[x >= q].mean())
 
 
-def huvudbana(mod: dict, kurva: dict, manader: int):
+def lang_premie(panel: pd.DataFrame) -> dict[str, float]:
+    """Långsiktig historisk bindningspremie: oviktat medel över hela perioden 1996–.
+
+    Används för marknadens implicita bana. Medvetet *utan* tidsviktning och över flera
+    räntecykler: premien är en strukturell storhet, och kortare perioder domineras av
+    enstaka episoder (t.ex. ger 2014– bara en höjningscykel och en missvisande positiv premie).
+    """
+    Y = bygg_mal(panel)
+    sel = panel.index >= "1996-01-01"
+    return {t: float(Y.loc[sel, f"premie_{t}"].mean()) for t in BINDNING_K}
+
+
+def huvudbana(mod: dict, kurva: dict, manader: int, premie_hist: dict | None = None):
     """Förväntad bana för rörlig bolåneränta.
 
     1. För horisonter ≤ 24 mån kombineras den direkta ML-prognosen med styrräntekanalen
@@ -146,7 +164,8 @@ def huvudbana(mod: dict, kurva: dict, manader: int):
        där modellerna bevisat träffsäkerhet styr de, annars marknadens prissättning.
     """
     res, kanal, makro, jmf, X = mod["resultat"], mod["kanal"], mod["makro"], mod["makro_jmf"], mod["X"]
-    premie_hist = {t: res[f"premie_{t}"].prognos["naiv"] for t in BINDNING_K}
+    if premie_hist is None:
+        premie_hist = {t: res[f"premie_{t}"].prognos["naiv"] for t in BINDNING_K}
     marknad = marknadens_bana(kurva, premie_hist, manader)
     ml, vikt, rb = {}, {}, {}
     for h in PROGNOS_H:
@@ -211,7 +230,7 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
     sista = panel.iloc[-1]
     kurva = {t: float(sista[f"bolan_{t}"]) for t in TENORS}
     M = profil.lan.horisont_ar * 12 + 1
-    bana, marknad, ml_bana, rb_bana, vikt, premie_hist = huvudbana(modeller, kurva, M)
+    bana, marknad, ml_bana, rb_bana, vikt, premie_hist = huvudbana(modeller, kurva, M, lang_premie(panel))
 
     dyn = skatta_dynamik(panel)
     scen = {
@@ -222,6 +241,20 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
     }
     sims = {k: simulera(kurva, v, dyn, n=profil.scenarier, seed=seed) for k, v in scen.items()}
     huvud = "Huvudscenario (ML + marknad)"
+
+    # Sannolikhetsviktning av huvudscenariots ränteutvecklingar
+    S = sims[huvud]
+    sann = modeller["sannolikhet"]
+    mal_p, sann_tab = {}, {}
+    for h, sv in sann.items():
+        if h >= S.shape[1]:
+            continue
+        sim_p = RK.simulerad_fordelning(S, h)
+        p = RK.kombinera(sv, sim_p)
+        mal_p[h] = p
+        sann_tab[h] = pd.DataFrame({"Simulering (före viktning)": sim_p, "ML-klassificerare": sv.modell_nu,
+                                    "Historisk basfrekvens": sv.bas, "Använd sannolikhet": p}, index=RK.KLASSER)
+    vikt_s, ess = RK.omvikta(S, mal_p)
 
     nuv = next((b for b in profil.banker if b.nuvarande), profil.banker[0])
     bobl = obligationskurva(sista)
@@ -235,7 +268,8 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
             s2.kategori = "bryt"
             strategier.append(s2)
 
-    rader, banor = [], {}
+    rader, banor, pv_alla, snitt_alla = [], {}, {}, {}
+    W = vikt_s
     for bank in profil.banker:
         for s in strategier:
             if s.kategori == "passiv" and not bank.nuvarande:
@@ -245,23 +279,26 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
             for sn, R in sims.items():
                 u = utvardera(s, bank, profil.lan, R, bobl, nuv)
                 if sn == huvud:
-                    pv = u["pv"]
+                    pv, sr = u["pv"], u["snittranta"]
                     rad.update({
-                        "forvantad_kostnad": float(pv.mean()),
-                        "median": float(np.median(pv)),
-                        "std": float(pv.std()),
-                        "p5": float(np.quantile(pv, 0.05)),
-                        "p95": float(np.quantile(pv, 0.95)),
-                        "cvar": _cvar(pv, profil.cvar_niva),
-                        "snittranta": float(u["snittranta"].mean()),
-                        "snittranta_p95": float(np.quantile(u["snittranta"], 0.95)),
-                        "max_manad_p95": float(np.quantile(u["max_manad"], 0.95)),
-                        "forsta_ar_manad": float(u["forsta_ar_manad"].mean()),
+                        "forvantad_kostnad": RK.vmedel(pv, W),
+                        "forvantad_kostnad_likavikt": float(pv.mean()),
+                        "median": RK.vkvantil(pv, W, 0.5),
+                        "std": float(np.sqrt(RK.vmedel((pv - RK.vmedel(pv, W)) ** 2, W))),
+                        "p5": RK.vkvantil(pv, W, 0.05),
+                        "p95": RK.vkvantil(pv, W, 0.95),
+                        "cvar": RK.vcvar(pv, W, profil.cvar_niva),
+                        "snittranta": RK.vmedel(sr, W),
+                        "snittranta_p95": RK.vkvantil(sr, W, 0.95),
+                        "max_manad_p95": RK.vkvantil(u["max_manad"], W, 0.95),
+                        "forsta_ar_manad": RK.vmedel(u["forsta_ar_manad"], W),
                         "engangskostnad": u["engang"],
                     })
                     if profil.lan.budget_manad:
-                        rad["p_over_budget"] = float(np.mean(u["max_manad"] > profil.lan.budget_manad))
+                        rad["p_over_budget"] = float(np.sum(W[u["max_manad"] > profil.lan.budget_manad]))
                     banor[(bank.namn, s.namn)] = u["snitt_bana"]
+                    pv_alla[(bank.namn, s.namn)] = pv
+                    snitt_alla[(bank.namn, s.namn)] = sr
                 else:
                     rad[f"kostnad | {sn}"] = float(u["pv"].mean())
             rader.append(rad)
@@ -275,18 +312,42 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
         df[f"rang | {sn}"] = df[kol].rank()
         rangkol.append(f"rang | {sn}")
     df["samsta_rang"] = df[rangkol].max(axis=1)
+    # Ånger och sannolikhet att slå rörlig (hos samma bank)
+    nycklar = list(pv_alla)
+    for b in {k[0] for k in nycklar}:
+        sub = {k: pv_alla[k] for k in nycklar if k[0] == b}
+        ref = (b, "Rörlig 3 mån")
+        if ref in sub:
+            ang = RK.anger_och_jamforelse(sub, W, ref)
+            for k, r in ang.iterrows():
+                m = (df["bank"] == k[0]) & (df["strategi"] == k[1])
+                df.loc[m, "p_billigare_an_rorlig"] = r["p_billigare_an_rorlig"]
+    ang_all = RK.anger_och_jamforelse(pv_alla, W, nycklar[0])
+    for k, r in ang_all.iterrows():
+        m = (df["bank"] == k[0]) & (df["strategi"] == k[1])
+        df.loc[m, "forvantad_anger"] = r["forvantad_anger"]
+        df.loc[m, "anger_p95"] = r["anger_p95"]
     df = df.sort_values("poang").reset_index(drop=True)
+    bast_bank = df.iloc[0]["bank"]
+    matris, matris_p = RK.scenariomatris(
+        {k[1]: v for k, v in pv_alla.items() if k[0] == bast_bank},
+        {k[1]: v for k, v in snitt_alla.items() if k[0] == bast_bank}, S, W, h=min(36, S.shape[1] - 1))
 
     # Personliga räntor idag per bank och tenor
     erbjud = pd.DataFrame({b.namn: {t: b.listrantor[t] - b.rabatter.get(t, 0) for t in TENORS}
                            for b in profil.banker}).T
     erbjud.loc["Marknadssnitt (SCB)"] = kurva
 
-    signaler = pd.DataFrame({
-        t: {"förväntad bindningspremie (pe)": res[f"premie_{t}"].ensemble,
-            "P(bindning billigare än rörlig)": res[f"premie_{t}"].p_positiv,
-            "modell": "/".join(res[f"premie_{t}"].vikter)}
-        for t in BINDNING_K}).T
+    from scipy.stats import norm
+    sig = {}
+    for t in BINDNING_K:
+        r = res[f"premie_{t}"]
+        utan_skill = list(r.vikter) == ["naiv"]
+        pe = premie_hist[t] if utan_skill else r.ensemble   # utan ML-skicklighet: långsiktig premie
+        sig[t] = {"förväntad bindningspremie (pe)": pe,
+                  "P(bindning billigare än rörlig)": float(norm.sf(0, loc=pe, scale=max(r.sigma, 1e-6))),
+                  "modell": "historiskt snitt 1996– (ML saknar träffsäkerhet)" if utan_skill else "/".join(r.vikter)}
+    signaler = pd.DataFrame(sig).T
     prognos = pd.DataFrame({
         f"{h} mån": {"ML-ensemble": kurva["3M"] + res[f"d3m_{h}"].ensemble,
                      "Marknad": marknad[h], "Riksbankens bana": rb_bana[h], "Huvudscenario": bana[h],
@@ -302,6 +363,10 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
         "sims": sims, "huvud": huvud, "resultat": df, "erbjudanden": erbjud,
         "signaler": signaler, "prognos": prognos, "premie_hist": premie_hist,
         "profil": profil, "nuvarande_bank": nuv.namn, "strategibanor": banor,
+        "sannolikhet": {"tabeller": sann_tab, "validering": pd.DataFrame(
+            {f"{h} mån": v.validering for h, v in sann.items()}), "ess": ess, "vikter": W,
+            "modellvikt": {h: v.vikt_modell for h, v in sann.items()}},
+        "scenariomatris": matris, "scenariomatris_p": matris_p,
     }
 
 
@@ -318,6 +383,9 @@ def sammanfatta(a: dict) -> list[str]:
               f" nuvärde räntekostnad efter avdrag {_kr(bast['forvantad_kostnad'])} kr"
               f" (CVaR{int(prof.cvar_niva*100)} {_kr(bast['cvar'])} kr)")
     ut.append(f"    Robusthet: sämsta rang över scenarier {int(bast['samsta_rang'])} av {len(df)}")
+    if not pd.isna(bast.get("p_billigare_an_rorlig", np.nan)):
+        ut.append(f"    Sannolikhet att bli billigare än rörligt: {bast['p_billigare_an_rorlig']:.0%}. "
+                  f"Förväntad ånger (merkostnad mot bästa val i efterhand): {_kr(bast['forvantad_anger'])} kr.")
     billigast_mu = df["forvantad_kostnad"].min()
     if bast["forvantad_kostnad"] > billigast_mu + 1:
         ut.append(f"    Försäkringskostnad: {_kr(bast['forvantad_kostnad'] - billigast_mu)} kr högre förväntad kostnad än "
@@ -356,6 +424,11 @@ def sammanfatta(a: dict) -> list[str]:
             battre = "vänta" if tim["poang"] < d["poang"] else "binda direkt"
             ut.append(f"  Tidpunkt: för {motsv} är det bättre att {battre} "
                       f"({tim['strategi']}: {_kr(tim['poang'])} kr vs direkt: {_kr(d['poang'])} kr).")
+    sn = a["sannolikhet"]
+    for h, t in sn["tabeller"].items():
+        p = t["Använd sannolikhet"]
+        ut.append(f"  Sannolikheter rörlig ränta om {h} mån: " + ", ".join(f"{k.lower()} {v:.0%}" for k, v in p.items())
+                  + f" (ML-vikt {sn['modellvikt'][h]:.0%})")
     mk = a["makro"]
     st, kp = mk["styr"], mk["kpif"]
     ut.append(f"  Styrränta nu {mk['styr0']:.2f} %. Om 12 mån: ML {st.loc['12 mån', 'ML-ensemble']:.2f} %, "

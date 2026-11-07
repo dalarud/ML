@@ -42,6 +42,23 @@ def bygg_features(p: pd.DataFrame) -> pd.DataFrame:
     f["vol_stat2"] = p["stat_2y_spann"].rolling(6).mean()
     # Nivå relativt lång historik (mean reversion-signal)
     f["r3_vs_5arsmedel"] = r3 - r3.rolling(60, min_periods=24).mean()
+    # Realekonomi och kärninflation (Riksbankens utfallsdata, med publiceringsfördröjning)
+    if "kpifxe" in p:
+        f["kpifxe_yoy"] = p["kpifxe"]
+        f["karninfl_gap"] = p["kpifxe"] - 2.0
+        f["realranta_karna"] = p["styrranta"] - p["kpifxe"]
+        f["d6_kpifxe"] = p["kpifxe"] - p["kpifxe"].shift(6)
+    if "bnp" in p:
+        f["bnp_yoy"] = p["bnp"]
+        f["bnpgap"] = p["bnpgap"]
+        f["d12_bnpgap"] = p["bnpgap"] - p["bnpgap"].shift(12)
+    if "arbl" in p:
+        # Arbetslöshet finns från 2001; före dess fylls nivån med första värdet och förändringen med 0
+        arbl = p["arbl"].fillna(p["arbl"].dropna().iloc[0])
+        f["arbetsloshet"] = arbl
+        f["d12_arbetsloshet"] = (p["arbl"] - p["arbl"].shift(12)).fillna(0.0)
+    if "kix" in p:
+        f["d12_kix_pct"] = (p["kix"] / p["kix"].shift(12) - 1) * 100   # + = svagare krona
     return f
 
 
@@ -111,6 +128,13 @@ def realtidsprognoser(p: pd.DataFrame, prog: pd.DataFrame) -> pd.DataFrame:
         ut[f"mkt_dstyr_{h}"] = [varde("mkt_styr", t, h) for t in p.index] - styr
     for h in KPIF_H:
         ut[f"rb_dkpif_{h}"] = [varde("rb_kpif", t, h) for t in p.index] - kpif
+    # Riksbankens syn på kärninflation, resursutnyttjande och arbetsmarknad 12 mån framåt
+    if "kpifxe" in p:
+        ut["rb_dkpifxe_12"] = [varde("rb_kpifxe", t, 12) for t in p.index] - p["kpifxe"]
+    if "bnpgap" in p:
+        ut["rb_bnpgap_12"] = [varde("rb_bnpgap", t, 12) for t in p.index]
+    if "arbl" in p:
+        ut["rb_darbl_12"] = [varde("rb_arbl", t, 12) for t in p.index] - p["arbl"]
     ut["har_rb_prognos"] = ut["rb_dstyr_12"].notna().astype(float)
     # Proxy före 2015: marknadens 2-årsränta minus styrränta, skalad till horisonten
     for h in STYR_H:
@@ -119,6 +143,11 @@ def realtidsprognoser(p: pd.DataFrame, prog: pd.DataFrame) -> pd.DataFrame:
         ut[f"mkt_dstyr_{h}"] = ut[f"mkt_dstyr_{h}"].fillna(proxy)
     for h in KPIF_H:
         ut[f"rb_dkpif_{h}"] = ut[f"rb_dkpif_{h}"].fillna(0.0)
+    for c in ("rb_dkpifxe_12", "rb_darbl_12"):
+        if c in ut:
+            ut[c] = ut[c].fillna(0.0)
+    if "rb_bnpgap_12" in ut:
+        ut["rb_bnpgap_12"] = ut["rb_bnpgap_12"].fillna(p["bnpgap"])   # proxy: dagens gap
     return ut
 
 
@@ -131,10 +160,28 @@ def bygg_makromal(p: pd.DataFrame) -> pd.DataFrame:
     return y
 
 
-def dataset_makro(p: pd.DataFrame, prog: pd.DataFrame):
-    """Features inkl. Riksbankens/marknadens realtidsprognoser, plus alla mål."""
-    X = bygg_features(p).join(realtidsprognoser(p, prog))
+def vikter(p: pd.DataFrame, halveringstid_ar: float | None = None) -> pd.Series:
+    """Observationsvikter: proxydata väger hälften; valfritt avtagande vikt för äldre data."""
+    v = pd.Series(np.where(p["proxy"] == 1, 0.5, 1.0), index=p.index)
+    if halveringstid_ar:
+        alder = (p.index[-1] - p.index).days / 365.25
+        v = v * 0.5 ** (alder / halveringstid_ar)
+    return v
+
+
+UTOKADE = ("kpifxe", "bnp", "bnpgap", "arbl", "kix")
+
+
+def dataset_makro(p: pd.DataFrame, prog: pd.DataFrame, halveringstid_ar: float | None = None,
+                  utokade=True):
+    """Features inkl. Riksbankens/marknadens realtidsprognoser, plus alla mål.
+
+    `utokade`: True = alla realekonomiska serier, False = inga, eller en lista med de
+    serier (ur UTOKADE) som ska användas.
+    """
+    behall = UTOKADE if utokade is True else (() if utokade is False else tuple(utokade))
+    q = p.drop(columns=[c for c in UTOKADE if c in p and c not in behall])
+    X = bygg_features(q).join(realtidsprognoser(q, prog))
     Y = bygg_mal(p).join(bygg_makromal(p))
     ok = X.notna().all(axis=1)
-    vikt = np.where(p["proxy"] == 1, 0.5, 1.0)
-    return X[ok], Y[ok], pd.Series(vikt, index=p.index)[ok]
+    return X[ok], Y[ok], vikter(p, halveringstid_ar)[ok]
