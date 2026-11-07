@@ -24,7 +24,7 @@ from .data import ROOT, TENORS, bygg_panel, las_prognoser
 from .features import BINDNING_K, KPIF_H, PROGNOS_H, STYR_H, bygg_mal, dataset_makro, _manadsbana
 from .models import MalResultat, feature_importance, kor_alla, kor_makro, realtids_stack, riktmarken
 from .simulate import forvantad_bana, marknadens_bana, simulera, skatta_dynamik
-from .strategies import Bank, Lan, standardstrategier, utvardera
+from .strategies import Bank, Lan, amorteringsplan, standardstrategier, stresstest, utvardera
 from . import risk as RK
 
 HALVERINGSTID_AR = 10    # tidsviktning av träningsdata: vald i ablationsstudien (docs/UTREDNING.md)
@@ -296,6 +296,12 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
                     })
                     if profil.lan.budget_manad:
                         rad["p_over_budget"] = float(np.sum(W[u["max_manad"] > profil.lan.budget_manad]))
+                    rad["boende_ar1"] = RK.vmedel(u["boende_ar1"], W)
+                    rad["boende_max_p95"] = RK.vkvantil(u["boende_max"], W, 0.95)
+                    if "kvar_min" in u:
+                        rad["kvar_min_p5"] = RK.vkvantil(u["kvar_min"], W, 0.05)
+                        rad["p_underskott"] = float(np.sum(W[u["kvar_min"] < 0]))
+                        rad["boendeandel_max_p95"] = RK.vkvantil(u["boendeandel_max"], W, 0.95)
                     banor[(bank.namn, s.namn)] = u["snitt_bana"]
                     pv_alla[(bank.namn, s.namn)] = pv
                     snitt_alla[(bank.namn, s.namn)] = sr
@@ -367,6 +373,24 @@ def analysera(profil: Profil, tvinga_traning: bool = False, seed: int = 0) -> di
             {f"{h} mån": v.validering for h, v in sann.items()}), "ess": ess, "vikter": W,
             "modellvikt": {h: v.vikt_modell for h, v in sann.items()}},
         "scenariomatris": matris, "scenariomatris_p": matris_p,
+        "ekonomi": hushallsekonomi(profil.lan, M - 1),
+    }
+
+
+def hushallsekonomi(lan: Lan, M: int) -> dict | None:
+    if not lan.bostadsvarde:
+        return None
+    plan = amorteringsplan(lan, M)
+    ar = plan.groupby(plan.index // 12).agg(saldo=("saldo", "first"), amortering=("amortering", "sum"),
+                                             belaningsgrad=("belaningsgrad", "first"), kravandel=("kravandel", "first"))
+    ar.index = [f"År {i + 1}" for i in ar.index]
+    inkomst_ar = (lan.bruttoinkomst_manad or 0) * 12
+    return {
+        "plan": ar, "stress": stresstest(lan),
+        "belaningsgrad": lan.belopp / lan.bostadsvarde,
+        "skuldkvot": lan.belopp / inkomst_ar if inkomst_ar else np.nan,
+        "ar_till_70": next((i for i, v in enumerate(ar["belaningsgrad"]) if v <= 0.70), None),
+        "ar_till_50": next((i for i, v in enumerate(ar["belaningsgrad"]) if v <= 0.50), None),
     }
 
 
@@ -424,6 +448,22 @@ def sammanfatta(a: dict) -> list[str]:
             battre = "vänta" if tim["poang"] < d["poang"] else "binda direkt"
             ut.append(f"  Tidpunkt: för {motsv} är det bättre att {battre} "
                       f"({tim['strategi']}: {_kr(tim['poang'])} kr vs direkt: {_kr(d['poang'])} kr).")
+    ek = a.get("ekonomi")
+    if ek:
+        lan = prof.lan
+        ut.append(f"  Belåningsgrad {ek['belaningsgrad']:.0%} → amorteringskrav {ek['plan']['kravandel'].iloc[0]:.0%} "
+                  f"({_kr(ek['plan']['amortering'].iloc[0])} kr/år). Under 70 % "
+                  + (f"om ca {ek['ar_till_70']} år" if ek['ar_till_70'] is not None else "inte inom horisonten")
+                  + f" (oförändrat bostadsvärde). Skuldkvot {ek['skuldkvot']:.1f} × bruttoinkomst.")
+        if "kvar_min_p5" in bast:
+            ut.append(f"  Betalningsförmåga ({bast['strategi']}): boendekostnad år 1 ≈ {_kr(bast['boende_ar1'])} kr/mån, "
+                      f"högst {_kr(bast['boende_max_p95'])} kr/mån i 95 % av scenarierna "
+                      f"({bast['boendeandel_max_p95']:.0%} av nettoinkomsten). "
+                      f"Sannolikhet för underskott efter levnadskostnader: {bast['p_underskott']:.1%}.")
+        st7 = ek["stress"].loc["7 %"]
+        if "Kvar att leva på kr/mån" in st7:
+            ut.append(f"  Stresstest 7 % ränta: boendekostnad {_kr(st7['Boendekostnad totalt kr/mån'])} kr/mån, "
+                      f"kvar att leva på {_kr(st7['Kvar att leva på kr/mån'])} kr/mån.")
     sn = a["sannolikhet"]
     for h, t in sn["tabeller"].items():
         p = t["Använd sannolikhet"]

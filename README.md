@@ -34,7 +34,7 @@ Steg 2: features (~80 st, tidsviktade) ─► Ridge / Random Forest / Gradient B
 ```bash
 pip install -r requirements.txt
 python -m bolan hamta            # hämta senaste data (SCB + Riksbanken), ~1 min
-# fyll i config/profil.toml med ditt lån, dina banker, listräntor och rabatter
+cp config/profil.toml config/min_profil.toml   # fyll i dina egna siffror (committas inte)
 python -m bolan analysera        # rekommendation + rapport/bolaneplan.html
 python -m bolan analysera --riskaversion 0.5
 python -m bolan backtest         # historisk backtest
@@ -45,9 +45,14 @@ python -m pytest tests
 Data finns redan cachad i `data/raw/` (t.o.m. 2026-09). Modellerna tränas vid första körningen (~3 min) och
 cachas sedan tills nya data hämtas.
 
-## Din profil (`config/profil.toml`)
+## Din profil (`config/min_profil.toml`)
 
-* `[lan]` – belopp, horisont, amortering, nuvarande bindning (och månader kvar), ränteavdrag, budget.
+Personliga uppgifter (lån, bostadsvärde, inkomster) och rapporter med dina siffror hålls utanför git
+(`.gitignore`). `config/profil.toml` är en exempelprofil med påhittade belopp.
+
+
+* `[lan]` – belopp, bostadsvärde (→ belåningsgrad och amorteringskrav), horisont, nuvarande bindning,
+  ränteavdrag och antal låntagare, hushållets inkomster och kostnader (kvar-att-leva-på, stresstest).
 * `[risk]` – `riskaversion` λ (0 riskneutral · 0,25 balanserad · 0,5 försiktig · 1+ mycket försiktig).
 * `[[bank]]` – ett block per bank/offert: listräntor och **rabatter per bindningstid**, flyttkostnad och
   `befintlig_kund_rabattandel` (hur mycket av rabatten en passiv kund behåller).

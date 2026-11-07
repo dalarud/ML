@@ -14,7 +14,11 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("hamta", help="Hämta senaste data från SCB och Riksbanken")
     a = sub.add_parser("analysera", help="Full analys + rekommendation + HTML-rapport")
-    a.add_argument("--profil", default=str(ROOT / "config" / "profil.toml"))
+    standard = ROOT / "config" / "min_profil.toml"
+    if not standard.exists():
+        standard = ROOT / "config" / "profil.toml"
+    a.add_argument("--profil", default=str(standard),
+                   help="Profil (standard: config/min_profil.toml om den finns, annars exempelprofilen)")
     a.add_argument("--rapport", default=str(ROOT / "rapport" / "bolaneplan.html"))
     a.add_argument("--riskaversion", type=float, help="Överstyr λ i profilen")
     a.add_argument("--omtrana", action="store_true", help="Träna om modellerna även om cache finns")

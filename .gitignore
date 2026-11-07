@@ -2,3 +2,7 @@ data/modellcache.pkl
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Personliga uppgifter och rapporter med personliga siffror publiceras inte
+config/min_profil.toml
+rapport/*.html

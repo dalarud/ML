@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+import pandas as pd
 
 from .data import TENORS
 
@@ -32,6 +33,8 @@ class Bank:
     flyttkostnad: float = 0.0
     befintlig_kund_rabattandel: float = 0.6
     rabatt_garanti_manader: int = 12   # hur länge rörlig rabatt gäller innan den kan sänkas
+    # Extra rabatt (pe) när belåningsgraden vid räntesättningen är högst nyckeln, t.ex. {"0.6": 0.10}
+    belaningstrappa: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -46,6 +49,41 @@ class Lan:
     diskonteringsranta: float = 2.0
     budget_manad: float | None = None
     rse_paslag: float = 1.0           # påslag (procentenheter) i jämförelseräntan vid RSE
+    # Bostad, amorteringskrav och hushållsekonomi
+    bostadsvarde: float | None = None
+    amorteringskrav: bool = True      # FI:s krav: 2 % över 70 % belåning, 1 % mellan 50 och 70 %
+    bostad_prisutveckling: float = 0.0  # %/år, används vid omvärdering vart 5:e år
+    antal_lantagare: int = 1          # ränteavdragets 100 000-gräns gäller per person
+    bruttoinkomst_manad: float | None = None
+    nettoinkomst_manad: float | None = None
+    ovriga_boendekostnader_manad: float = 0.0   # drift/avgift, el, försäkring m.m.
+    levnadskostnader_manad: float = 0.0         # mat, kläder, transport m.m. (KALP)
+
+
+def amorteringskrav_andel(ltv: float) -> float:
+    return 0.02 if ltv > 0.70 else (0.01 if ltv > 0.50 else 0.0)
+
+
+def amorteringsplan(lan: Lan, M: int) -> pd.DataFrame:
+    """Saldo, amortering och belåningsgrad månad för månad.
+
+    Kravet beräknas på lånebeloppet vid senaste värdering. Bostaden antas omvärderas vart
+    5:e år med `bostad_prisutveckling` (0 % = försiktigt antagande). Frivillig amortering
+    (`amortering_per_ar`) gäller om den är högre än kravet.
+    """
+    saldo, varde = lan.belopp, lan.bostadsvarde
+    bas_belopp, bas_varde = lan.belopp, lan.bostadsvarde
+    rader = []
+    for m in range(M):
+        if varde and m > 0 and m % 60 == 0:
+            varde = lan.bostadsvarde * (1 + lan.bostad_prisutveckling / 100) ** (m / 12)
+            bas_belopp, bas_varde = saldo, varde
+        ltv = saldo / bas_varde if bas_varde else np.nan
+        krav = amorteringskrav_andel(ltv) * bas_belopp / 12 if (lan.amorteringskrav and bas_varde) else 0.0
+        amort = min(max(krav, lan.amortering_per_ar / 12), saldo)
+        rader.append((saldo, amort, saldo / varde if varde else np.nan, krav * 12 / bas_belopp if bas_belopp else 0))
+        saldo -= amort
+    return pd.DataFrame(rader, columns=["saldo", "amortering", "belaningsgrad", "kravandel"])
 
 
 @dataclass
@@ -111,7 +149,15 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
     rabatt = np.array([bank.rabatter.get(t, 0.0) for t in TN])
 
     manad = np.arange(M)
-    saldo = np.maximum(lan.belopp - lan.amortering_per_ar * manad / 12, 0.0)
+    plan = amorteringsplan(lan, M)
+    saldo = plan["saldo"].values
+    ltv = plan["belaningsgrad"].values
+    trappa = sorted(((float(k), v) for k, v in bank.belaningstrappa.items()))
+
+    def ltv_rabatt(tau):
+        if not trappa or np.isnan(ltv[tau]):
+            return 0.0
+        return max([v for g, v in trappa if ltv[tau] <= g], default=0.0)
 
     # Nuvarande bundna lån ligger kvar tills villkorsändringsdagen (om vi inte bryter)
     start = 0 if (strategi.bryt_bindning or lan.nuvarande_tenor == "3M") else min(lan.bundet_kvar_manader, M)
@@ -149,7 +195,7 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
                 f = 1.0 if tau - senast_forhandlad < bank.rabatt_garanti_manader else bank.befintlig_kund_rabattandel
             else:
                 f = 1.0 if tau == start else bank.befintlig_kund_rabattandel
-            r = R[:, tau, k] + listpaslag[k] - rabatt[k] * f
+            r = R[:, tau, k] + listpaslag[k] - rabatt[k] * f - ltv_rabatt(tau)
             r_del[:, tau - start:slut - start] = r[:, None]
             # Värdet av låst ränta som löper efter horisonten (mark-to-market)
             if tau + TM[k] > M and k > 0:
@@ -167,7 +213,8 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
         for a in np.unique(ar):
             sel = ar == a
             arsrta = kostnad_m[:, sel].sum(1)
-            avdrag = 0.30 * np.minimum(arsrta, 100_000) + 0.21 * np.maximum(arsrta - 100_000, 0)
+            tak = 100_000 * max(lan.antal_lantagare, 1)
+            avdrag = 0.30 * np.minimum(arsrta, tak) + 0.21 * np.maximum(arsrta - tak, 0)
             andel = np.divide(avdrag, arsrta, out=np.zeros_like(arsrta), where=arsrta > 0)
             netto[:, sel] = kostnad_m[:, sel] * (1 - andel[:, None])
     else:
@@ -175,11 +222,40 @@ def utvardera(strategi: Strategi, bank: Bank, lan: Lan, R: np.ndarray, bobl_nu: 
     df = (1 + lan.diskonteringsranta / 100) ** (-(manad + 1) / 12)
     pv = netto @ df + engang - terminal_vinst * (1 - 0.3 * lan.ranteavdrag) * df[-1]
     snittranta = (kostnad_m.sum(1) / (saldo.sum() / 1200)) if saldo.sum() > 0 else np.zeros(n)
-    return {
+    # Boendekostnad per månad (ränta efter avdrag + amortering + övrigt) och kvar att leva på
+    boende = netto + plan["amortering"].values[None, :] + lan.ovriga_boendekostnader_manad
+    ut = {
         "pv": pv,
         "snittranta": snittranta,
         "max_manad": kostnad_m.max(1),
         "forsta_ar_manad": kostnad_m[:, :12].mean(1),
         "engang": engang,
         "snitt_bana": ranta.mean(0),
+        "boende_max": boende.max(1),
+        "boende_ar1": boende[:, :12].mean(1),
     }
+    if lan.nettoinkomst_manad:
+        kvar = lan.nettoinkomst_manad - boende - lan.levnadskostnader_manad
+        ut["kvar_min"] = kvar.min(1)
+        ut["boendeandel_max"] = boende.max(1) / lan.nettoinkomst_manad
+    return ut
+
+
+def stresstest(lan: Lan, rantor=(3.0, 4.0, 5.0, 6.0, 7.0)) -> pd.DataFrame:
+    """Månadskostnad första året vid olika räntenivåer (bankernas kalkylränta ligger runt 7 %)."""
+    plan = amorteringsplan(lan, 12)
+    saldo, amort = plan["saldo"].mean(), plan["amortering"].mean()
+    rader = {}
+    for r in rantor:
+        rta_ar = saldo * r / 100
+        tak = 100_000 * max(lan.antal_lantagare, 1)
+        avdrag = (0.30 * min(rta_ar, tak) + 0.21 * max(rta_ar - tak, 0)) if lan.ranteavdrag else 0.0
+        netto_m = (rta_ar - avdrag) / 12
+        boende = netto_m + amort + lan.ovriga_boendekostnader_manad
+        rad = {"Ränta före avdrag kr/mån": rta_ar / 12, "Ränta efter avdrag kr/mån": netto_m,
+               "Amortering kr/mån": amort, "Boendekostnad totalt kr/mån": boende}
+        if lan.nettoinkomst_manad:
+            rad["Andel av nettoinkomst"] = boende / lan.nettoinkomst_manad
+            rad["Kvar att leva på kr/mån"] = lan.nettoinkomst_manad - boende - lan.levnadskostnader_manad
+        rader[f"{r:.0f} %"] = rad
+    return pd.DataFrame(rader).T

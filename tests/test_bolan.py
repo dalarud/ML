@@ -119,3 +119,22 @@ def test_viktade_riskmatt():
     # Mer vikt på höga utfall höjer väntevärdet
     w2 = np.where(x >= 50, 0.015, 0.005)
     assert vmedel(x, w2 / w2.sum()) > 49.5
+
+
+def test_amorteringskrav():
+    from bolan.strategies import amorteringsplan
+    plan = amorteringsplan(Lan(belopp=3_000_000, bostadsvarde=4_000_000), 24)   # 75 % -> 2 %
+    assert np.isclose(plan["amortering"].iloc[0] * 12, 60_000)
+    assert np.isclose(amorteringsplan(Lan(belopp=2_400_000, bostadsvarde=4_000_000), 1)["amortering"].iloc[0] * 12,
+                      24_000)                                                    # 60 % -> 1 %
+    assert amorteringsplan(Lan(belopp=1_800_000, bostadsvarde=4_000_000), 1)["amortering"].iloc[0] == 0
+
+
+def test_ranteavdrag_tva_lantagare():
+    R = _platt(nivå=4.0)
+    s = Strategi("r", [Del(1, "3M")])
+    b = Bank("A", {t: 4.0 for t in TN}, {t: 0.0 for t in TN}, nuvarande=True)
+    en = Lan(belopp=3_500_000, diskonteringsranta=0.0, amorteringskrav=False)
+    tva = Lan(belopp=3_500_000, diskonteringsranta=0.0, amorteringskrav=False, antal_lantagare=2)
+    # 140 000 kr ränta/år: en låntagare får bara 21 % på 40 000 kr, två får 30 % på allt
+    assert utvardera(s, b, tva, R)["pv"].mean() < utvardera(s, b, en, R)["pv"].mean()

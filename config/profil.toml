@@ -1,19 +1,29 @@
-# Din bolåneprofil. Lånebelopp, amortering och budget är fortfarande exempel – fyll i dina egna.
+# EXEMPELPROFIL med påhittade belopp. Kopiera till config/min_profil.toml och fyll i dina
+# egna siffror – den filen används automatiskt och committas inte (se .gitignore).
 # Räntor anges i procent, rabatter i procentenheter (pe), belopp i kronor.
 #
 # Bindningstider: "3M" (rörlig), "1Y", "2Y", "3Y", "5Y", "10Y"
 
 [lan]
 belopp = 3_000_000
+bostadsvarde = 4_000_000
 horisont_ar = 10                 # planeringshorisont
-amortering_per_ar = 60_000
+amorteringskrav = true           # 2 % över 70 % belåning, 1 % mellan 50–70 % (beräknas automatiskt)
+amortering_per_ar = 0            # frivillig amortering per år (används om den är högre än kravet)
+bostad_prisutveckling = 0.0      # %/år vid omvärdering vart 5:e år (0 = försiktigt)
 nuvarande_tenor = "3M"           # vad du har idag
-nuvarande_ranta = 2.85           # Handelsbanken 3 mån: listränta 4,19 − rabatt 1,34
+nuvarande_ranta = 2.85           # din nuvarande ränta
 bundet_kvar_manader = 0          # månader kvar till villkorsändringsdag (0 = rörligt/fritt)
-ranteavdrag = true               # räkna med 30 %/21 % ränteavdrag
+ranteavdrag = true               # 30 % upp till 100 000 kr räntekostnad per låntagare, 21 % därutöver
+antal_lantagare = 2
 diskonteringsranta = 2.0         # för nuvärdesberäkning (%/år)
-budget_manad = 12_000            # varningsgräns för räntekostnad per månad (kr, före avdrag)
 rse_paslag = 1.0                 # påslag i jämförelseräntan för ränteskillnadsersättning (kontrollera med banken)
+
+# Hushållets ekonomi (kvar-att-leva-på-kalkyl)
+bruttoinkomst_manad = 70_000     # hushållets samlade lön före skatt
+nettoinkomst_manad = 53_000      # efter skatt
+ovriga_boendekostnader_manad = 4_500   # drift/avgift, el, vatten, försäkring
+levnadskostnader_manad = 20_000        # mat, kläder, transport m.m.
 
 [risk]
 riskaversion = 0.25              # λ: 0 = bara förväntad kostnad, 0.25 = balanserad, 0.5 = försiktig, 1+ = mycket försiktig

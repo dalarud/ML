@@ -219,6 +219,43 @@ img{max-width:100%;height:auto}.tbl{border-collapse:collapse;font-size:12.5px;wi
 """
 
 
+def ekonomi_sektion(a, df) -> str:
+    ek = a.get("ekonomi")
+    if not ek:
+        return ""
+    lan = a["profil"].lan
+    pct = lambda v: f"{v:.0%}"
+    plan = ek["plan"].copy()
+    plan.columns = ["Lån vid årets början kr", "Amortering under året kr", "Belåningsgrad", "Amorteringskrav"]
+    kalp_kol = [c for c in ["boende_ar1", "boende_max_p95", "boendeandel_max_p95", "kvar_min_p5", "p_underskott"] if c in df]
+    kalp = df.head(10)[["strategi"] + kalp_kol].rename(columns={
+        "strategi": "Strategi", "boende_ar1": "Boendekostnad år 1 kr/mån", "boende_max_p95": "Högsta boendekostnad P95 kr/mån",
+        "boendeandel_max_p95": "Andel av netto P95", "kvar_min_p5": "Minsta kvar att leva på P5 kr/mån",
+        "p_underskott": "P(underskott)"})
+    fmt = {"Boendekostnad år 1 kr/mån": _kr, "Högsta boendekostnad P95 kr/mån": _kr, "Andel av netto P95": pct,
+           "Minsta kvar att leva på P5 kr/mån": _kr, "P(underskott)": lambda v: f"{v:.1%}"}
+    stress = ek["stress"]
+    sfmt = {c: _kr for c in stress.columns if "kr" in c}
+    sfmt["Andel av nettoinkomst"] = pct
+    return "".join([
+        "<h2>Din ekonomi: belåningsgrad, amortering och betalningsförmåga</h2>",
+        f"<p class='note'>Bostad {_kr(lan.bostadsvarde)} kr, lån {_kr(lan.belopp)} kr → belåningsgrad "
+        f"{ek['belaningsgrad']:.0%}. Skuldkvot {ek['skuldkvot']:.1f} gånger hushållets bruttoinkomst (under 4,5 – "
+        "inget extra amorteringskrav). Amorteringskravet: 2 % av lånet per år över 70 % belåning, 1 % mellan 50 och "
+        f"70 %. Bostadsvärdet antas oförändrat ({lan.bostad_prisutveckling:.0f} %/år) och omvärderas vart 5:e år. "
+        "Boendekostnad = ränta efter avdrag + amortering + övriga boendekostnader. Kvar att leva på = "
+        "nettoinkomst − boendekostnad − levnadskostnader.</p>",
+        "<h3>Amorteringsplan</h3><div class='wrap'>",
+        _tabell(plan, {"Lån vid årets början kr": _kr, "Amortering under året kr": _kr, "Belåningsgrad": pct,
+                       "Amorteringskrav": pct}), "</div>",
+        "<h3>Betalningsförmåga per strategi (sannolikhetsviktad)</h3><div class='wrap'>",
+        _tabell(kalp, fmt, index=False), "</div>",
+        "<h3>Stresstest: månadskostnad år 1 vid olika räntor</h3>",
+        "<p class='note'>Bankerna prövar normalt låntagare mot en kalkylränta runt 7 %.</p><div class='wrap'>",
+        _tabell(stress, sfmt), "</div>",
+    ])
+
+
 def bygg_rapport(a: dict, ut: Path) -> Path:
     df = a["resultat"]
     res = a["modeller"]
@@ -267,6 +304,7 @@ def bygg_rapport(a: dict, ut: Path) -> Path:
         "<h3>Effektiv ränta %</h3><div class='wrap'>" + _tabell(a["erbjudanden"]) + "</div>",
         "<h3>Listräntor %</h3><div class='wrap'>" + _tabell(lista) + "</div>",
         "<h3>Rabatter pe</h3><div class='wrap'>" + _tabell(rabatt) + "</div>",
+        ekonomi_sektion(a, df),
         "<h2>2. Historik</h2>", diagram_historik(p),
         "<h2>3. Inflation och styrränta (steg 1 i ML-kedjan)</h2>",
         "<p class='note'>Styrräntan och KPIF-inflationen prognostiseras med samma ML-modeller (Ridge, Random "
