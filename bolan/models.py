@@ -23,7 +23,7 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from .features import BINDNING_K, PROGNOS_H
+from .features import BINDNING_K, KPIF_H, PROGNOS_H, STYR_H
 
 
 def modellkatalog(seed: int = 0) -> dict:
@@ -105,7 +105,7 @@ def utvardera_mal(X: pd.DataFrame, y: pd.Series, w: pd.Series, horisont: int,
     preds = {m: np.full(len(yo), np.nan) for m in modeller}
     naiv_pred = np.full(len(yo), np.nan)
     # "Naiv" = ingen förändring för d3m, historiskt medel för premien
-    naiv_noll = y.name.startswith("d3m")
+    naiv_noll = y.name.startswith("d")  # förändringsmål: naiv = ingen förändring
 
     for tr, te in purged_walk_forward(len(yo), k, gap=horisont):
         naiv_pred[te] = 0.0 if naiv_noll else np.average(yo[tr], weights=wo[tr])
@@ -171,3 +171,77 @@ def feature_importance(X, y, w, seed: int = 0, top: int = 15) -> pd.Series:
     sl = slice(int(n * 2 / 3), n)
     pi = permutation_importance(rf, X[ok].iloc[sl], y[ok].iloc[sl], n_repeats=10, random_state=seed)
     return pd.Series(pi.importances_mean, index=X.columns).sort_values(ascending=False).head(top)
+
+
+# ---------------------------------------------------------------------------
+# Steg 1: makromodeller (styrränta, inflation) + jämförelse mot Riksbanken
+# ---------------------------------------------------------------------------
+MAKRO_MAL = [(f"dstyr_{h}", h) for h in STYR_H] + [(f"dkpif_{h}", h) for h in KPIF_H]
+
+
+def riktmarken(X: pd.DataFrame, mal: str) -> dict[str, pd.Series]:
+    """Externa prognoser att jämföra ML mot, så som de var kända i realtid."""
+    h = mal.split("_")[1]
+    if mal.startswith("dstyr"):
+        return {"Riksbanken": X[f"rb_dstyr_{h}"], "Marknaden": X[f"mkt_dstyr_{h}"]}
+    return {"Riksbanken": X[f"rb_dkpif_{h}"]}
+
+
+def kor_makro(X, Y, w, k: int = 5, seed: int = 0, verbose: bool = True):
+    """Purged walk-forward CV för makromålen + utvärdering mot Riksbanken/marknaden.
+
+    Jämförelsen görs på de out-of-sample-månader där Riksbanken hade en publicerad
+    prognos (2015–), så att alla prognoser bedöms på exakt samma data.
+    """
+    res, jmf = {}, {}
+    for namn, h in MAKRO_MAL:
+        if verbose:
+            print(f"  makro: tränar/validerar {namn} ...", flush=True)
+        r = utvardera_mal(X, Y[namn].rename(namn), w, h, k=k, seed=seed)
+        res[namn] = r
+        oos = r.oos
+        sel = X.loc[oos.index, "har_rb_prognos"] == 1
+        o = oos[sel]
+        if len(o) < 12:
+            continue
+        rad = {"naiv (oförändrat)": np.sqrt(np.mean(o["faktiskt"] ** 2)),
+               "ML-ensemble": np.sqrt(np.mean((o["faktiskt"] - o["ensemble"]) ** 2))}
+        for bn, serie in riktmarken(X, namn).items():
+            rad[bn] = np.sqrt(np.mean((o["faktiskt"] - serie.loc[o.index]) ** 2))
+        # Kombination ML + Riksbanken (+ marknad): invers MSE-viktning på samma period
+        kand = {"ML-ensemble": o["ensemble"], **{b: s.loc[o.index] for b, s in riktmarken(X, namn).items()}}
+        v = {b: 1 / max(rad[b] ** 2, 1e-9) for b in kand}
+        sv = sum(v.values())
+        komb = sum(v[b] / sv * kand[b] for b in kand)
+        rad["Kombination"] = np.sqrt(np.mean((o["faktiskt"] - komb) ** 2))
+        rad["n_manader"] = len(o)
+        rad["_vikter"] = {b: v[b] / sv for b in kand}
+        jmf[namn] = rad
+    return res, jmf
+
+
+def realtids_stack(X: pd.DataFrame, Y: pd.DataFrame, w: pd.Series, mal: list[str],
+                   omtraning: int = 12, min_train: int = 60, seed: int = 0) -> pd.DataFrame:
+    """Walk-forward-prognoser av makromålen, för användning som features i steg 2.
+
+    Vid varje omträningspunkt T tränas en Random Forest endast på rader vars utfall
+    var känt vid T (index <= T − h − 1) och förutsäger månaderna T..T+omtraning−1.
+    Före första möjliga träning sätts prognosen till 0 (= oförändrat).
+    Därmed innehåller featuren aldrig information som inte fanns vid tidpunkten.
+    """
+    n = len(X)
+    ut = pd.DataFrame(0.0, index=X.index, columns=[f"ml_{m}" for m in mal])
+    Xv, wv = X.values, w.values
+    for m in mal:
+        h = int(m.split("_")[1])
+        y = Y[m].values
+        for T in range(0, n, omtraning):
+            tr = np.where(~np.isnan(y) & (np.arange(n) <= T - h - 1))[0]
+            if len(tr) < min_train:
+                continue
+            rf = RandomForestRegressor(n_estimators=150, min_samples_leaf=5, max_features=0.4,
+                                       random_state=seed, n_jobs=-1)
+            rf.fit(Xv[tr], y[tr], sample_weight=wv[tr])
+            sl = slice(T, min(T + omtraning, n))
+            ut.iloc[sl, ut.columns.get_loc(f"ml_{m}")] = rf.predict(Xv[sl])
+    return ut

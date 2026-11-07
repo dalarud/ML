@@ -53,3 +53,37 @@ def test_rse():
 def test_forvantad_bana_interpolerar():
     b = forvantad_bana(3.0, {12: 1.0, 24: 1.0}, 24)
     assert b[0] == 3.0 and np.isclose(b[6], 3.5) and np.isclose(b[24], 4.0)
+
+
+def test_realtidsprognos_anvands_forst_efter_publicering():
+    from bolan.features import realtidsprognoser
+    idx = pd.date_range("2020-01-01", "2020-06-01", freq="MS")
+    p = pd.DataFrame({"styrranta": 1.0, "kpif_yoy": 2.0, "stat_2y": 1.0}, index=idx)
+    rader = []
+    for serie in ("rb_styr", "mkt_styr", "rb_kpif"):
+        for d, v in [("2020-03-31", 1.0), ("2020-06-30", 1.5), ("2021-03-31", 2.0), ("2021-06-30", 2.0)]:
+            rader.append((serie, "2020:1", pd.Timestamp("2020-03-20"), pd.Timestamp(d), 3.0 if serie == "rb_kpif" else v))
+    prog = pd.DataFrame(rader, columns=["serie", "omgang", "publicerad", "datum", "varde"])
+    ut = realtidsprognoser(p, prog)
+    # Före publicering (jan–feb): ingen Riksbanksprognos, proxy används och flaggan är 0
+    assert (ut.loc[:"2020-02-01", "har_rb_prognos"] == 0).all()
+    # Från mars: prognosen används
+    assert (ut.loc["2020-03-01":, "har_rb_prognos"] == 1).all()
+    assert np.isclose(ut.loc["2020-03-01", "rb_dstyr_12"], 1.0)  # 2021-03 -> 2.0 minus 1.0
+    assert np.isclose(ut.loc["2020-03-01", "rb_dkpif_12"], 1.0)
+
+
+def test_realtids_stack_ingen_framtidsinformation():
+    from bolan.models import realtids_stack
+    rng = np.random.default_rng(0)
+    n = 120
+    idx = pd.date_range("2000-01-01", periods=n, freq="MS")
+    X = pd.DataFrame(rng.normal(size=(n, 3)), index=idx)
+    Y = pd.DataFrame({"dstyr_12": rng.normal(size=n)}, index=idx)
+    w = pd.Series(1.0, index=idx)
+    a = realtids_stack(X, Y, w, ["dstyr_12"])
+    # Ändra framtida utfall – tidigare prognoser får inte påverkas
+    Y2 = Y.copy()
+    Y2.iloc[100:] = 99.0
+    b = realtids_stack(X, Y2, w, ["dstyr_12"])
+    assert np.allclose(a.iloc[:100], b.iloc[:100])

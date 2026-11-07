@@ -81,10 +81,52 @@ def diagram_prognos(a):
     ax.fill_between(fram, q[1], q[3], color=FARG[0], alpha=0.25, lw=0, label="25–75 %")
     ax.plot(fram, a["banor"]["huvud"][:M], color=FARG[0], label="Huvudscenario (förväntat)")
     ax.plot(fram, a["banor"]["marknad"][:M], color=FARG[1], ls="--", lw=1.4, label="Marknadens prissättning")
+    ax.plot(fram, a["banor"]["riksbank"][:M], color=FARG[3], ls="-.", lw=1.4, label="Via Riksbankens räntebana")
     ml = a["banor"]["ml"][:min(M, 61)]
     ax.plot(fram[:len(ml)], ml, color=FARG[2], ls=":", lw=1.6, label="Ren ML-ensemble")
     ax.set_ylabel("Rörlig bolåneränta, %")
     ax.legend(ncol=3, fontsize=8, loc="upper left")
+    return _png(fig)
+
+
+def diagram_styr(a):
+    mk, p = a["makro"], a["panel"]
+    hist = p["styrranta"].iloc[-72:]
+    t0 = hist.index[-1]
+    fig, ax = plt.subplots(figsize=(9, 3.4))
+    ax.plot(hist.index, hist.values, color="#0b0b0b", lw=1.6, label="Styrränta (utfall)")
+    b = mk["banor"]
+    rb = b["rb_styr"][b["rb_styr"].index >= t0]
+    mkt = b["mkt_styr"][b["mkt_styr"].index >= t0]
+    ax.plot(rb.index, rb.values, color=FARG[1], ls="--", lw=1.6, label=f"Riksbankens räntebana ({b['rb_styr_omgang']})")
+    ax.plot(mkt.index, mkt.values, color=FARG[3], ls=":", lw=1.8, label="Marknadens prissättning")
+    h = [0] + [int(i.split()[0]) for i in mk["styr"].index]
+    x = [t0 + pd.DateOffset(months=i) for i in h]
+    for kol, f, mark in [("ML-ensemble", FARG[2], "o"), ("Kombination", FARG[0], "D")]:
+        y = [mk["styr0"]] + list(mk["styr"][kol])
+        ax.plot(x, y, color=f, marker=mark, ms=5, lw=1.6, label=kol)
+    ax.set_ylabel("Styrränta, %")
+    ax.legend(ncol=3, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.1))
+    return _png(fig)
+
+
+def diagram_kpif(a):
+    mk, p = a["makro"], a["panel"]
+    hist = p["kpif_yoy"].iloc[-72:]
+    t0 = hist.index[-1]
+    fig, ax = plt.subplots(figsize=(9, 3.2))
+    ax.axhline(2.0, color="#c9c8c2", lw=1, ls="--")
+    ax.text(hist.index[0], 2.05, " inflationsmål 2 %", color=TEXT2, fontsize=8, va="bottom")
+    ax.plot(hist.index, hist.values, color="#0b0b0b", lw=1.6, label="KPIF, årstakt (utfall)")
+    rb = mk["banor"]["rb_kpif"]
+    rb = rb[rb.index >= t0]
+    ax.plot(rb.index, rb.values, color=FARG[1], ls="--", lw=1.6, label=f"Riksbankens prognos ({mk['banor']['rb_kpif_omgang']})")
+    h = [0] + [int(i.split()[0]) for i in mk["kpif"].index]
+    x = [t0 + pd.DateOffset(months=i) for i in h]
+    for kol, f, mark in [("ML-ensemble", FARG[2], "o"), ("Kombination", FARG[0], "D")]:
+        ax.plot(x, [mk["kpif0"]] + list(mk["kpif"][kol]), color=f, marker=mark, ms=5, lw=1.6, label=kol)
+    ax.set_ylabel("KPIF, %")
+    ax.legend(ncol=2, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.1))
     return _png(fig)
 
 
@@ -207,15 +249,34 @@ def bygg_rapport(a: dict, ut: Path) -> Path:
         "<h3>Listräntor %</h3><div class='wrap'>" + _tabell(lista) + "</div>",
         "<h3>Rabatter pe</h3><div class='wrap'>" + _tabell(rabatt) + "</div>",
         "<h2>2. Historik</h2>", diagram_historik(p),
-        "<h2>3. Prognos för rörlig bolåneränta</h2>",
-        "<p class='note'>Huvudscenariot väger ML-ensemblen mot marknadens implicita bana per horisont, med vikt "
-        "efter modellens bevisade träffsäkerhet out-of-sample (ML-vikt = 1 vid R² ≥ 0,25). Banden visar "
+        "<h2>3. Inflation och styrränta (steg 1 i ML-kedjan)</h2>",
+        "<p class='note'>Styrräntan och KPIF-inflationen prognostiseras med samma ML-modeller (Ridge, Random "
+        "Forest, Gradient Boosting, neuralt nät) och jämförs med Riksbankens egna publicerade prognoser och "
+        "marknadens prissättning. Alla tre kombineras med vikter efter träffsäkerhet out-of-sample sedan 2015. "
+        "Prognoserna förs sedan vidare som förklaringsvariabler till bolånemodellerna och via "
+        "styrräntekanalen (genomslag styrränta → rörlig bolåneränta).</p>",
+        diagram_styr(a), "<div class='wrap'>" + _tabell(a["makro"]["styr"]) + "</div>",
+        diagram_kpif(a), "<div class='wrap'>" + _tabell(a["makro"]["kpif"]) + "</div>",
+        "<h3>Träffsäkerhet: ML mot Riksbanken och marknaden (RMSE, procentenheter, lägre är bättre)</h3>",
+        "<p class='note'>Samma out-of-sample-månader (2015–) för alla. dstyr = förändring i styrränta, "
+        "dkpif = förändring i KPIF-inflation, siffran = horisont i månader. Där ML inte slår naiv prognos "
+        "(t.ex. styrränta 24 mån) är ML-prognosen = oförändrat, och vikten flyttas i praktiken till "
+        "Riksbanken och marknaden.</p>",
+        "<div class='wrap'>" + _tabell(a["makro"]["validering"], {"n_manader": lambda v: f"{int(v)}"}) + "</div>",
+        "<h3>Kombinationsvikter</h3><div class='wrap'>" + _tabell(a["makro"]["vikter"].fillna(0)) + "</div>",
+        "<h3>Styrräntekanalen: genomslag till rörlig bolåneränta</h3>",
+        "<p class='note'>beta = hur mycket den rörliga bolåneräntan historiskt rört sig per procentenhet "
+        "styrränteförändring. vikt_kanal = andel av bolåneprognosen som går via styrräntan (resten är den "
+        "direkta ML-prognosen).</p>",
+        "<div class='wrap'>" + _tabell(a["makro"]["kanal"], {"n": lambda v: "" if pd.isna(v) else f"{int(v)}"}) + "</div>",
+        "<h2>4. Prognos för rörlig bolåneränta</h2>",
+        "<p class='note'>Huvudscenariot kombinerar den direkta ML-prognosen med styrräntekanalen och väger sedan mot marknadens implicita bana per horisont, med vikt efter bevisad träffsäkerhet out-of-sample (ML-vikt = 1 vid R² ≥ 0,25). Banden visar "
         f"{prof.scenarier} block-bootstrapscenarier.</p>",
         diagram_prognos(a), "<div class='wrap'>" + _tabell(a["prognos"]) + "</div>",
         "<h3>Bindningssignaler</h3><p class='note'>Bindningspremie = genomsnittlig rörlig ränta under "
         "bindningstiden minus bunden ränta idag. Positiv = att binda förväntas bli billigare.</p>",
         "<div class='wrap'>" + _tabell(sig) + "</div>",
-        "<h2>4. Strategier – kostnad mot risk</h2>",
+        "<h2>5. Strategier – kostnad mot risk</h2>",
         f"<p class='note'>Varje punkt är en strategi hos {html.escape(bast_bank)}. Längre ner till vänster är "
         "bättre. Poäng = förväntad kostnad + λ·(CVaR − förväntad kostnad).</p>",
         diagram_risk(df, bast_bank),
@@ -223,7 +284,7 @@ def bygg_rapport(a: dict, ut: Path) -> Path:
         "<h3>Kostnadsspridning för de bästa strategierna</h3>", diagram_fordelning(df, a),
         "<h3>Robusthet: förväntad kostnad (kr) under alternativa scenarier</h3>",
         "<div class='wrap'>" + _tabell(robust, {c: _kr for c in robust.columns[2:]}, index=False) + "</div>",
-        "<h2>5. Modellvalidering (purged walk-forward k-fold, k=5)</h2>",
+        "<h2>6. Modellvalidering (purged walk-forward k-fold, k=5)</h2>",
         "<p class='note'>R² out-of-sample relativt naiv prognos (ingen förändring / historiskt snitt). "
         "&gt; 0 betyder att modellen slår den naiva prognosen på data den aldrig sett. Kolumnerna "
         "”blandad k-fold” visar vad vanlig slumpmässig k-fold felaktigt hade rapporterat – läckage "
@@ -231,13 +292,13 @@ def bygg_rapport(a: dict, ut: Path) -> Path:
         "<div class='wrap'>" + _tabell(cvtab) + "</div>",
         "<h3>Träffsäkerhet i riktning (andel rätt tecken)</h3><div class='wrap'>" + _tabell(trf) + "</div>",
         "<h3>Viktigaste förklaringsvariabler</h3>", diagram_feature(a["feature_importance"]),
-        "<h2>6. Historisk backtest</h2>",
+        "<h2>7. Historisk backtest</h2>",
         "<p class='note'>Faktiska genomsnittsräntor (SCB). Rullande 5-årsfönster sedan 2005: snittränta om man "
         "alltid förnyat samma bindningstid.</p>", diagram_backtest(rf),
         "<div class='wrap'>" + _tabell(vinnare.to_frame(), {vinnare.name: lambda v: f"{v:.0%}"}) + "</div>",
         "<h3>ML-timing (walk-forward) mot statiska strategier, 2008–</h3>",
         "<div class='wrap'>" + _tabell(bt) + "</div>",
-        "<h2>7. Metod och begränsningar</h2>",
+        "<h2>8. Metod och begränsningar</h2>",
         "<ul class='note'><li>Räntor är svåra att förutsäga: modellerna har påvisbar förmåga på 3–12 månader men "
         "inte på flera års sikt. Därför bygger rekommendationen på riskjusterad kostnad över tusentals scenarier, "
         "inte på en enskild prognos.</li><li>Före 2005 (och för vissa bindningstider före 2014) är "

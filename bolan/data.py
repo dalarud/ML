@@ -123,12 +123,52 @@ def hamta_scb_kpif() -> pd.DataFrame:
     return df
 
 
+MPD = "https://api.riksbank.se/monetary_policy_data/v1/forecasts"
+PROGNOS_SERIER = {
+    "SEQRATENAYNA": "rb_styr",     # Riksbankens räntebana (kvartal)
+    "SEMCPIFNAYNA": "rb_kpif",     # Riksbankens KPIF-prognos, årstakt (månad)
+    "SEDMENAYNA": "mkt_styr",      # Marknadens prissatta styrränteförväntningar (kvartal)
+}
+
+
+def hamta_riksbank_prognoser() -> pd.DataFrame:
+    """Alla prognosomgångar (vintages) sedan 2015 för räntebana, KPIF och marknadsförväntningar.
+
+    Varje rad: serie, prognosomgång, publiceringsdag, datum som avses, värde. Genom att
+    bara använda omgångar som var publicerade vid en viss tidpunkt blir de historiska
+    features "realtidskorrekta" (ingen framtida information läcker in).
+    """
+    rader = []
+    for sid, namn in PROGNOS_SERIER.items():
+        d = _get(f"{MPD}?series={sid}")["data"][0]
+        for v in d["vintages"]:
+            md = v["metadata"]
+            for o in v["observations"]:
+                if o["value"] is None:
+                    continue
+                rader.append((namn, md["policy_round"], md["policy_round_end_dtm"][:10],
+                              md["forecast_cutoff_date"], o["dt"], float(o["value"])))
+        time.sleep(1.0)
+    df = pd.DataFrame(rader, columns=["serie", "omgang", "publicerad", "cutoff", "datum", "varde"])
+    df.to_csv(RAW / "riksbank_prognoser.csv", index=False)
+    return df
+
+
+def las_prognoser() -> pd.DataFrame:
+    p = RAW / "riksbank_prognoser.csv"
+    if not p.exists():
+        raise FileNotFoundError(f"{p} saknas – kör `python -m bolan hamta` först.")
+    return pd.read_csv(p, parse_dates=["publicerad", "cutoff", "datum"])
+
+
 def hamta_allt() -> None:
     RAW.mkdir(parents=True, exist_ok=True)
     print("Hämtar SCB bolåneräntor ...")
     hamta_scb_bolan()
     print("Hämtar SCB KPIF ...")
     hamta_scb_kpif()
+    print("Hämtar Riksbankens prognoser (räntebana, KPIF, marknadsförväntningar) ...")
+    hamta_riksbank_prognoser()
     print("Hämtar Riksbanken (tar ett par minuter p.g.a. anropskvot) ...")
     hamta_riksbanken()
     print(f"Klart. Data sparad i {RAW}")

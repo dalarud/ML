@@ -9,8 +9,13 @@ Utredning, analys och modellval: se [docs/UTREDNING.md](docs/UTREDNING.md).
 ## Så fungerar det
 
 ```
-SCB + Riksbanken ─► features (52 st) ─► Ridge / Random Forest / Gradient Boosting / Neuralt nät
-                                         └─ purged walk-forward k-fold, ensemble
+SCB + Riksbanken + Riksbankens prognosomgångar (räntebana, KPIF, marknadsförväntningar, realtid)
+        │
+Steg 1: ML-prognoser för styrränta och KPIF-inflation ──► jämförs/kombineras med Riksbanken & marknaden
+        │  (walk-forward-prognoser som features)
+Steg 2: features (~70 st) ─► Ridge / Random Forest / Gradient Boosting / Neuralt nät
+                              └─ purged walk-forward k-fold, ensemble
+                              └─ + styrräntekanal (genomslag styrränta → rörlig bolåneränta)
                                                    │
                marknadens implicita bana ──► skicklighetsviktad förväntad bana
                                                    │

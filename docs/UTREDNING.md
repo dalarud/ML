@@ -67,6 +67,33 @@ Slutsats: **modellerna har verklig prognosförmåga 3–12 månader framåt, men
 som utlovar mer har sannolikt validerat fel (se kolumnen blandad k-fold). En walk-forward-backtest av en
 ren ML-timingstrategi (bind den tid med högst predikterad premie) slog inte enkla 1–2-årsbindningar 2008–.
 
+## 4b. Inflation och Riksbankens räntebana – ML-kedja i två steg
+
+Bolåneräntan styrs i grunden av styrräntan, som i sin tur styrs av inflationen. Modellen följer den kedjan:
+
+**Data.** Riksbankens API för penningpolitiska prognoser ger *alla prognosomgångar sedan 2015* (60 st):
+räntebanan, KPIF-prognosen och marknadens prissatta styrränteförväntningar. Vid varje historisk månad
+används bara den omgång som då var publicerad (realtidsdata, ingen framtida information). Före 2015
+används en marknadsproxy (2-årig statsränta − styrränta), markerad med en flagga.
+
+**Steg 1 – makromodeller.** Samma modellfamilj (Ridge, Random Forest, Gradient Boosting, neuralt nät) och
+samma purged walk-forward k-fold används för att förutsäga
+* styrräntans förändring om 3, 6, 12, 24 månader (`dstyr_h`)
+* KPIF-inflationens förändring om 6, 12, 24 månader (`dkpif_h`).
+
+Varje ML-prognos jämförs med Riksbankens egen prognos och marknadens prissättning **på exakt samma
+out-of-sample-månader (2015–)**. De tre kombineras sedan med vikter efter invers MSE. Kombinationen har lägst
+fel på alla horisonter (t.ex. styrränta 12 mån: naiv 1,07, ML 0,81, kombination 0,66 pe RMSE).
+
+**Steg 2 – bolånemodellerna** får som features: walk-forward-prognoserna från steg 1 (`ml_dstyr_6/12/24`,
+`ml_dkpif_12`, framtagna med modeller som bara sett data fram till respektive månad), Riksbankens räntebana
+och KPIF-prognos (`rb_dstyr_h`, `rb_dkpif_h`) samt marknadens förväntningar (`mkt_dstyr_h`).
+
+**Styrräntekanalen.** Genomslaget β_h från styrränta till rörlig bolåneränta skattas historiskt. Prognosen
+för rörlig ränta på 3–24 mån blir en viktning av den direkta ML-prognosen och β_h × kombinerad
+styrränteprognos, med vikter efter out-of-sample-fel. Ett extra scenario, "Riksbankens räntebana", används i
+robusthetskontrollen.
+
 ## 5. Design som följer av analysen
 
 1. **Skicklighetsviktad förväntad bana:** för varje horisont vägs ML-ensemblen mot marknadens implicita

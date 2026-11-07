@@ -65,3 +65,76 @@ def dataset(p: pd.DataFrame):
     ok = X.notna().all(axis=1)
     vikt = np.where(p["proxy"] == 1, 0.5, 1.0)  # proxydata väger mindre
     return X[ok], Y[ok], pd.Series(vikt, index=p.index)[ok]
+
+
+# ---------------------------------------------------------------------------
+# Makro: styrränta och inflation
+# ---------------------------------------------------------------------------
+STYR_H = [3, 6, 12, 24]   # horisonter för styrränteprognoser (månader)
+KPIF_H = [6, 12, 24]      # horisonter för inflationsprognoser (månader)
+
+
+def _manadsbana(g: pd.DataFrame) -> pd.Series:
+    """En prognosomgång -> månadsserie (kvartalsdata interpoleras linjärt)."""
+    s = g.set_index(g["datum"].dt.to_period("M").dt.to_timestamp())["varde"].sort_index()
+    s = s[~s.index.duplicated(keep="last")]
+    idx = pd.date_range(s.index.min(), s.index.max(), freq="MS")
+    return s.reindex(idx).interpolate()
+
+
+def realtidsprognoser(p: pd.DataFrame, prog: pd.DataFrame) -> pd.DataFrame:
+    """Riksbankens och marknadens prognoser så som de såg ut vid varje månad t.
+
+    Vid månad t används den senaste prognosomgång som publicerats senast i slutet av t.
+    Före 2015 (inga sparade omgångar) fylls värdena med en marknadsproxy och
+    `har_rb_prognos` = 0, så att modellerna kan skilja på dem.
+    """
+    ut = pd.DataFrame(index=p.index)
+    banor = {}
+    for (serie, omg), g in prog.groupby(["serie", "omgang"]):
+        banor.setdefault(serie, []).append((g["publicerad"].iloc[0], _manadsbana(g)))
+    for serie in banor:
+        banor[serie].sort(key=lambda x: x[0])
+
+    def varde(serie, t, h):
+        manadsslut = t + pd.offsets.MonthEnd(0)
+        kand = [b for pub, b in banor.get(serie, []) if pub <= manadsslut]
+        if not kand:
+            return np.nan
+        b = kand[-1]
+        mal = t + pd.DateOffset(months=h)
+        return float(b.loc[:mal].iloc[-1]) if mal >= b.index[0] else np.nan
+
+    styr, kpif = p["styrranta"], p["kpif_yoy"]
+    for h in STYR_H:
+        ut[f"rb_dstyr_{h}"] = [varde("rb_styr", t, h) for t in p.index] - styr
+        ut[f"mkt_dstyr_{h}"] = [varde("mkt_styr", t, h) for t in p.index] - styr
+    for h in KPIF_H:
+        ut[f"rb_dkpif_{h}"] = [varde("rb_kpif", t, h) for t in p.index] - kpif
+    ut["har_rb_prognos"] = ut["rb_dstyr_12"].notna().astype(float)
+    # Proxy före 2015: marknadens 2-årsränta minus styrränta, skalad till horisonten
+    for h in STYR_H:
+        proxy = (p["stat_2y"] - styr) * min(h, 24) / 24
+        ut[f"rb_dstyr_{h}"] = ut[f"rb_dstyr_{h}"].fillna(proxy)
+        ut[f"mkt_dstyr_{h}"] = ut[f"mkt_dstyr_{h}"].fillna(proxy)
+    for h in KPIF_H:
+        ut[f"rb_dkpif_{h}"] = ut[f"rb_dkpif_{h}"].fillna(0.0)
+    return ut
+
+
+def bygg_makromal(p: pd.DataFrame) -> pd.DataFrame:
+    y = pd.DataFrame(index=p.index)
+    for h in STYR_H:
+        y[f"dstyr_{h}"] = p["styrranta"].shift(-h) - p["styrranta"]
+    for h in KPIF_H:
+        y[f"dkpif_{h}"] = p["kpif_yoy"].shift(-h) - p["kpif_yoy"]
+    return y
+
+
+def dataset_makro(p: pd.DataFrame, prog: pd.DataFrame):
+    """Features inkl. Riksbankens/marknadens realtidsprognoser, plus alla mål."""
+    X = bygg_features(p).join(realtidsprognoser(p, prog))
+    Y = bygg_mal(p).join(bygg_makromal(p))
+    ok = X.notna().all(axis=1)
+    vikt = np.where(p["proxy"] == 1, 0.5, 1.0)
+    return X[ok], Y[ok], pd.Series(vikt, index=p.index)[ok]
